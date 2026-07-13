@@ -35,6 +35,14 @@ export type BackgroundMessage =
   | { type: 'AUTH_REQUIRED'; message?: string }
   | { type: 'POLL_STATUS'; data: PollStatusPayload };
 
+/** Display names for each platform code, reused by the popup "Platforms" section. */
+export const PLATFORM_NAMES: Record<PlatformCode, string> = {
+  instagram: 'Instagram',
+  facebook: 'Facebook',
+  tiktok: 'TikTok',
+  gbp: 'Google Business Profile',
+};
+
 /** Status payload sent from service worker to popup */
 export interface PollStatusPayload {
   pendingCount: number;
@@ -42,10 +50,26 @@ export interface PollStatusPayload {
   lastPollError: string | null;
   consecutiveFailures: number;
   isAuthenticated: boolean;
+  /** Per-platform rows for the popup's "Platforms" section. */
+  platforms: Array<{
+    code: PlatformCode;
+    name: string;
+    status: 'ok' | 'error' | 'idle' | 'breaker_open';
+    lastSuccessAt: number | null;
+    lastFailureAt: number | null;
+    lastErrorReason: string | null;
+    consecutiveFailures: number;
+  }>;
+  /** Active poll backoff in minutes, null when running on the default cadence. */
+  pollBackoffMinutes: number | null;
 }
 
 /** Popup requests to the service worker */
-export type PopupMessage = { type: 'GET_STATE' } | { type: 'CONNECT'; token: string };
+export type PopupMessage =
+  | { type: 'GET_STATE' }
+  | { type: 'CONNECT'; token: string }
+  | { type: 'RETRY_NOW' }
+  | { type: 'CLEAR_ERRORS' };
 
 /** Result of a scheduling attempt on a social platform */
 export interface ScheduleResult {

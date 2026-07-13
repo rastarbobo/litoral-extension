@@ -1,5 +1,7 @@
+import { CircuitBreaker, getBreakerState } from './circuit-breaker';
 import { processPendingSchedules } from './scheduling-orchestrator';
 import { API_BASE_URL } from '../config';
+import { PLATFORM_NAMES, SUPPORTED_PLATFORMS } from '@extension/shared';
 import { extensionAuthStorage, extensionPollStorage } from '@extension/storage';
 import type {
   CampaignPayload,
@@ -15,6 +17,18 @@ const POLL_ALARM_NAME = 'campaign-queue-poll';
 const MAX_CONSECUTIVE_FAILURES = 6;
 const BADGE_AUTH_REQUIRED = '🔑';
 const BADGE_ERROR = '!';
+
+// ─── Module State ────────────────────────────────────────
+
+/**
+ * Shared circuit-breaker instance for the popup-driven CLEAR_ERRORS action.
+ * State lives in `chrome.storage.local` (see ./circuit-breaker.ts); this is
+ * a separate instance from the orchestrator's private breaker, but both reach
+ * the SAME persisted state through their reads/writes. The orchestrator's
+ * instance owns scheduling decisions (isOpen/recordFailure/recordSuccess);
+ * this one is only used for bulk reset on operator request.
+ */
+const popupBreaker = new CircuitBreaker();
 
 /**
  * Poll-alarm cadence on consecutive polling failures.
@@ -289,16 +303,56 @@ chrome.runtime.onMessage.addListener((message, _sender, rawSendResponse) => {
   void (async () => {
     switch (msg.type) {
       case 'GET_STATE': {
-        const [pollState, isAuthenticated] = await Promise.all([
+        const [pollState, isAuthenticated, telemetry, breakerState, pollBackoffMinutes] = await Promise.all([
           extensionPollStorage.get(),
           extensionAuthStorage.hasToken(),
+          extensionPollStorage.getTelemetry(),
+          getBreakerState(),
+          extensionPollStorage.getPollBackoff(),
         ]);
+
+        const now = Date.now();
+        const platforms = SUPPORTED_PLATFORMS.map(code => {
+          const entry = telemetry[code] ?? {
+            lastSuccessAt: null,
+            lastFailureAt: null,
+            lastErrorCode: null,
+            lastErrorReason: null,
+            consecutiveFailures: 0,
+          };
+          const openUntil = breakerState.openUntil[code];
+          const breakerOpen = typeof openUntil === 'number' && now < openUntil;
+
+          let status: 'ok' | 'error' | 'idle' | 'breaker_open';
+          if (breakerOpen) {
+            status = 'breaker_open';
+          } else if (entry.lastFailureAt != null && entry.lastFailureAt > (entry.lastSuccessAt ?? 0)) {
+            status = 'error';
+          } else if (entry.lastSuccessAt != null) {
+            status = 'ok';
+          } else {
+            status = 'idle';
+          }
+
+          return {
+            code,
+            name: PLATFORM_NAMES[code],
+            status,
+            lastSuccessAt: entry.lastSuccessAt,
+            lastFailureAt: entry.lastFailureAt,
+            lastErrorReason: entry.lastErrorReason,
+            consecutiveFailures: entry.consecutiveFailures,
+          };
+        });
+
         const payload: PollStatusPayload = {
           pendingCount: pollState.pendingSchedules.length,
           lastPollTime: pollState.lastPollTime,
           lastPollError: pollState.lastPollError,
           consecutiveFailures: pollState.consecutiveFailures,
           isAuthenticated,
+          platforms,
+          pollBackoffMinutes,
         };
         if (!sendResponse._called) {
           sendResponse._called = true;
@@ -309,6 +363,35 @@ chrome.runtime.onMessage.addListener((message, _sender, rawSendResponse) => {
       case 'CONNECT': {
         await extensionAuthStorage.setToken(msg.token);
         void checkAuthAndPoll(); // Non-blocking
+        if (!sendResponse._called) {
+          sendResponse._called = true;
+          sendResponse({ success: true });
+        }
+        break;
+      }
+      case 'RETRY_NOW': {
+        // Operator-initiated immediate poll: clear the pending alarm so the
+        // manual poll is the sole driver, run the poll, then recreate the
+        // alarm at the default cadence so future ticks keep firing regardless
+        // of whether the manual poll succeeded (handlePollSuccess also
+        // recreates the alarm, but the no-token path skips it — this is the
+        // safety net).
+        await chrome.alarms.clear(POLL_ALARM_NAME);
+        await checkAuthAndPoll();
+        await createPollAlarm();
+        if (!sendResponse._called) {
+          sendResponse._called = true;
+          sendResponse({ success: true });
+        }
+        break;
+      }
+      case 'CLEAR_ERRORS': {
+        // Reset per-platform telemetry + backoff, the poll-level failure
+        // counter / last error message, and bulk-reset every circuit breaker.
+        await extensionPollStorage.clearAllTelemetry();
+        await extensionPollStorage.resetFailureCount();
+        await popupBreaker.resetAll();
+        await updateBadgeFromStorage();
         if (!sendResponse._called) {
           sendResponse._called = true;
           sendResponse({ success: true });
