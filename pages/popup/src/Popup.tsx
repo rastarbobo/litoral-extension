@@ -4,6 +4,7 @@ import type { PollStatusPayload } from '@extension/shared';
 // ─── Popup: Litoral Agency Extension Status ──────────────
 
 const formatRelativeTime = (ms: number | null): string => {
+  if (!ms) return 'Never';
   const seconds = Math.floor((Date.now() - ms) / 1000);
   if (seconds < 60) return 'Just now';
   if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
