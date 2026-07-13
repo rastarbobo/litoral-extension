@@ -13,6 +13,7 @@
     "build": "vite build",
     "dev": "vite build --mode development",
     "test": "vitest run",
+    "test:unit": "vitest run",
     "lint": "eslint .",
     "lint:fix": "pnpm lint --fix",
     "prettier": "prettier . --write --ignore-path ../.prettierignore",
@@ -30,7 +31,9 @@
     "@extension/tsconfig": "workspace:*",
     "@extension/vite-config": "workspace:*",
     "@laynezh/vite-plugin-lib-assets": "^1.1.0",
+    "happy-dom": "^15.11.7",
     "magic-string": "^0.30.17",
-    "ts-loader": "^9.5.2"
+    "ts-loader": "^9.5.2",
+    "vitest": "^2.1.9"
   }
 }
