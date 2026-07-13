@@ -12,10 +12,21 @@ import type {
 // ─── Constants ───────────────────────────────────────────
 
 const POLL_ALARM_NAME = 'campaign-queue-poll';
-const POLL_INTERVAL_MINUTES = 20;
 const MAX_CONSECUTIVE_FAILURES = 6;
 const BADGE_AUTH_REQUIRED = '🔑';
 const BADGE_ERROR = '!';
+
+/**
+ * Poll-alarm cadence on consecutive polling failures.
+ *
+ * Indexed by `consecutiveFailures - 1` (zero-based), so the first failed poll
+ * re-arms at 1 minute, the second at 2, the third at 5, and stays at 5 until
+ * the next successful poll resets the cadence. The cap is a defensive floor
+ * in case the array is ever extended beyond `POLL_BACKOFF_CAP_MINUTES`.
+ */
+const POLL_BACKOFF_STEPS = [1, 2, 5] as const;
+const POLL_BACKOFF_CAP_MINUTES = 5;
+const POLL_DEFAULT_PERIOD_MINUTES = 20;
 
 // ─── Alarm Lifecycle ─────────────────────────────────────
 
@@ -26,9 +37,9 @@ const createPollAlarm = async (): Promise<void> => {
   const existing = await chrome.alarms.get(POLL_ALARM_NAME);
   if (!existing) {
     await chrome.alarms.create(POLL_ALARM_NAME, {
-      periodInMinutes: POLL_INTERVAL_MINUTES,
+      periodInMinutes: POLL_DEFAULT_PERIOD_MINUTES,
     });
-    console.log('[Litoral] Poll alarm created: every', POLL_INTERVAL_MINUTES, 'minutes');
+    console.log('[Litoral] Poll alarm created: every', POLL_DEFAULT_PERIOD_MINUTES, 'minutes');
   }
 };
 
@@ -133,9 +144,7 @@ const pollForCampaigns = async (token: string): Promise<void> => {
     const { campaigns } = response.data;
 
     if (campaigns.length === 0) {
-      await extensionPollStorage.resetFailureCount();
-      await extensionPollStorage.markPollSuccess();
-      await updateBadgeFromStorage();
+      await handlePollSuccess();
       console.log('[Litoral] Poll successful — no campaigns waiting');
       return;
     }
@@ -160,9 +169,7 @@ const pollForCampaigns = async (token: string): Promise<void> => {
       }
     }
 
-    await extensionPollStorage.resetFailureCount();
-    await extensionPollStorage.markPollSuccess();
-    await updateBadgeFromStorage();
+    await handlePollSuccess();
     console.log('[Litoral] Poll successful — processed', campaigns.length, 'campaign(s)');
 
     // Trigger scheduling for newly claimed campaigns
@@ -172,6 +179,36 @@ const pollForCampaigns = async (token: string): Promise<void> => {
     const message = error instanceof Error ? error.message : 'Network error';
     await handlePollError(message, false);
   }
+};
+
+// ─── Poll Alarm Backoff ──────────────────────────────────
+
+/**
+ * Recreate the poll alarm with a one-shot `delayInMinutes` window. We use
+ * `delayInMinutes` instead of `periodInMinutes` so the alarm fires exactly
+ * once at the next scheduled tick; if the next tick triggers another
+ * backoff (or reset), the alarm listener overwrites the schedule rather than
+ * coasting on a stale period.
+ */
+const reschedulePollAlarm = async (delayMinutes: number): Promise<void> => {
+  await chrome.alarms.clear(POLL_ALARM_NAME);
+  await chrome.alarms.create(POLL_ALARM_NAME, {
+    delayInMinutes: delayMinutes,
+  });
+};
+
+/**
+ * Reset all backoff bookkeeping and re-arm the alarm at the default cadence
+ * (one-shot `delayInMinutes` of 20, which is also the historical polling
+ * period). Next successful poll re-schedules again — the cascade is self-
+ * perpetuating as long as `checkAuthAndPoll` continues to succeed.
+ */
+const handlePollSuccess = async (): Promise<void> => {
+  await extensionPollStorage.markPollSuccess();
+  await extensionPollStorage.setPollBackoff(null);
+  await extensionPollStorage.resetFailureCount();
+  await updateBadgeFromStorage();
+  await reschedulePollAlarm(POLL_DEFAULT_PERIOD_MINUTES);
 };
 
 // ─── Error Handling ──────────────────────────────────────
@@ -197,20 +234,31 @@ const handlePollError = async (message: string, isUnauthorized: boolean): Promis
       // Popup not open — that's fine
     }
     console.warn('[Litoral] Auth token expired — badge set to 🔑');
-  } else if (failures >= MAX_CONSECUTIVE_FAILURES) {
-    // 6 consecutive failures (2 hours): notify owner
-    await chrome.action.setBadgeText({ text: BADGE_ERROR });
-    await chrome.action.setBadgeBackgroundColor({ color: '#ba1a1a' }); // error red
-    try {
-      await chrome.notifications.create('litoral-connection-error', {
-        type: 'basic',
-        iconUrl: chrome.runtime.getURL('icon-128.png'),
-        title: 'Litoral: Connection Issue',
-        message: 'Unable to reach server. Please check your internet connection and reopen Chrome.',
-      });
-      console.error('[Litoral] Max consecutive failures reached — notification sent');
-    } catch (e) {
-      console.warn('[Litoral] Failed to show notification:', e);
+  } else {
+    // Non-401 failure: apply exponential backoff before the next poll. The
+    // failure counter was already incremented inside `recordFailure` so we
+    // look it up here and translate failures-1 → step index.
+    const idx = Math.min(failures - 1, POLL_BACKOFF_STEPS.length - 1);
+    const steppedMinutes = POLL_BACKOFF_STEPS[Math.max(idx, 0)];
+    const nextMinutes = Math.min(steppedMinutes, POLL_BACKOFF_CAP_MINUTES);
+    await extensionPollStorage.setPollBackoff(nextMinutes);
+    await reschedulePollAlarm(nextMinutes);
+
+    if (failures >= MAX_CONSECUTIVE_FAILURES) {
+      // 6 consecutive failures (2 hours): notify owner
+      await chrome.action.setBadgeText({ text: BADGE_ERROR });
+      await chrome.action.setBadgeBackgroundColor({ color: '#ba1a1a' }); // error red
+      try {
+        await chrome.notifications.create('litoral-connection-error', {
+          type: 'basic',
+          iconUrl: chrome.runtime.getURL('icon-128.png'),
+          title: 'Litoral: Connection Issue',
+          message: 'Unable to reach server. Please check your internet connection and reopen Chrome.',
+        });
+        console.error('[Litoral] Max consecutive failures reached — notification sent');
+      } catch (e) {
+        console.warn('[Litoral] Failed to show notification:', e);
+      }
     }
   }
 };

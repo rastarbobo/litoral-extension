@@ -21,6 +21,7 @@
  * - Content scripts only message the background worker — no direct API calls
  */
 
+import { CircuitBreaker } from './circuit-breaker';
 import { API_BASE_URL } from '../config';
 import { extensionPollStorage, extensionAuthStorage } from '@extension/storage';
 import type {
@@ -46,6 +47,27 @@ const PLATFORM_SCHEDULE_URLS: Record<PlatformCode, string> = {
   gbp: 'https://business.google.com/posts/create',
 };
 
+/**
+ * Parse a `reason` string into a structured `{ code, message }` pair.
+ *
+ * Content script catch blocks format errors as `<CODE>: <selector-or-message>`
+ * (e.g. `TEXT_SET_FAILED: input.form`) when derived from `DomUtilError`. Free-
+ * form reasons (e.g. `timeout`, `tab_creation_failed`) have no structured code.
+ *
+ * Anything that doesn't look like a SCREAMING_SNAKE prefix is treated as a
+ * plain platform message and falls back to the `PLATFORM` code so telemetry
+ * never loses the original string.
+ */
+const parseReason = (reason: string | undefined): { code: string; message: string } => {
+  if (!reason) return { code: 'UNKNOWN', message: 'Unknown failure' };
+  const idx = reason.indexOf(':');
+  if (idx <= 0) return { code: 'PLATFORM', message: reason };
+  const head = reason.slice(0, idx).trim();
+  const tail = reason.slice(idx + 1).trim();
+  if (!/^[A-Z][A-Z0-9_]+$/.test(head)) return { code: 'PLATFORM', message: reason };
+  return { code: head, message: tail || reason };
+};
+
 // ─── Module State ────────────────────────────────────────
 
 /** Prevents overlapping scheduling cycles */
@@ -53,6 +75,13 @@ let isSchedulingInProgress = false;
 
 /** Track active scheduling tabs for cleanup */
 const activeSchedulingTabs = new Map<string, number>();
+
+/**
+ * Shared circuit-breaker instance for per-platform scheduling protection.
+ * State persists in `chrome.storage.local` under the breaker's own key so it
+ * survives service-worker restarts and is shared across all callers.
+ */
+const breaker = new CircuitBreaker();
 
 // ─── Public API ──────────────────────────────────────────
 
@@ -83,9 +112,10 @@ const processPendingSchedules = async (): Promise<void> => {
 
   for (let i = 0; i < batch.length; i++) {
     const campaign = batch[i];
+    let result: ScheduleResult | undefined;
 
     try {
-      const result = await scheduleOneCampaign(campaign);
+      result = await scheduleOneCampaign(campaign);
 
       if (result.success && result.scheduledAt) {
         // Mark scheduled on server BEFORE removing from local storage.
@@ -106,6 +136,22 @@ const processPendingSchedules = async (): Promise<void> => {
     // Remove from pending AFTER server confirmation (success or not — we don't retry same campaign)
     // On failure, the stale lock scanner will auto-revert the campaign to 'approved' for next cycle
     await extensionPollStorage.removeCampaign(campaign.campaignId);
+
+    // Per-platform telemetry: write AFTER removeCampaign so a rejected set never
+    // orphans a still-pending schedule entry. Success → recordPlatformSuccess.
+    // Failure → recordPlatformFailure with a structured error code parsed from
+    // the reason string (or the synthetic 'BREAKER' code when the breaker
+    // short-circuits the call).
+    if (result?.success && result.scheduledAt) {
+      await extensionPollStorage.recordPlatformSuccess(campaign.platform);
+    } else if (result && !result.success) {
+      if (result.reason === 'circuit_breaker_open') {
+        await extensionPollStorage.recordPlatformFailure(campaign.platform, 'BREAKER', result.reason);
+      } else {
+        const { code, message } = parseReason(result.reason);
+        await extensionPollStorage.recordPlatformFailure(campaign.platform, code, message);
+      }
+    }
 
     // 90-second delay between platforms (prevents rate limiting)
     if (i < batch.length - 1) {
@@ -129,9 +175,18 @@ const getSchedulingInProgress = (): boolean => isSchedulingInProgress;
 // ─── Single Campaign Scheduling ──────────────────────────
 
 const scheduleOneCampaign = async (campaign: CampaignPayload): Promise<ScheduleResult> => {
+  if (await breaker.isOpen(campaign.platform)) {
+    return {
+      campaignId: campaign.campaignId,
+      platform: campaign.platform,
+      success: false,
+      reason: 'circuit_breaker_open',
+    };
+  }
+
   const platformUrl = getPlatformScheduleUrl(campaign.platform);
 
-  return new Promise<ScheduleResult>(resolve => {
+  const inner = new Promise<ScheduleResult>(resolve => {
     let resolved = false;
     let messageListener: ((message: ContentScriptMessage) => void) | null = null;
     let createdTabId: number | null = null;
@@ -244,6 +299,19 @@ const scheduleOneCampaign = async (campaign: CampaignPayload): Promise<ScheduleR
       }
     });
   });
+
+  const result = await inner;
+  if (result.success && result.scheduledAt) {
+    await breaker.recordSuccess(campaign.platform);
+  } else if (result.reason !== 'circuit_breaker_open') {
+    // Circuit-breaker short-circuits already returned before we entered `inner`,
+    // so this branch covers every real scheduling failure (timeout, tab errors,
+    // SCHEDULE_FAILED from the content script). Re-recording failures caused
+    // by the breaker being open would loop the same cycle before storage can
+    // even observe the next isOpen read.
+    await breaker.recordFailure(campaign.platform);
+  }
+  return result;
 };
 
 // ─── Server Communication ────────────────────────────────
