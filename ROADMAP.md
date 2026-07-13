@@ -96,7 +96,7 @@ litoral-extension/
 
 ## 🗺️ Phase Roadmap
 
-### **Phase 1: Polish Existing Features** 🚧 *In Progress*
+### **Phase 1: Polish Existing Features** 🚧 *In Progress — 1.3/1.4/1.5 + gap fixes done; 1.1/1.2 pending*
 > **Objective:** Complete TikTok & GBP stubs, improve stability.
 > **Timeline:** Week 1
 
@@ -104,9 +104,11 @@ litoral-extension/
 |---|------|--------|---------|---------------------|
 | 1.1 | **TikTok Content Script** | 🔴 Not Started | Implement `pages/content/src/matches/tiktok/index.ts` — navigate TikTok Studio/Creator Portal, upload media, set caption, schedule post | - Can log into TikTok Studio  <br>- Uploads image/video media  <br>- Sets caption text  <br>- Clicks schedule button  <br>- Reports success/failure to background |
 | 1.2 | **Google Business Profile Content Script** | 🔴 Not Started | Implement `pages/content/src/matches/gbp/index.ts` — navigate Google Business Profile manager, create post with media, set schedule | - Can navigate to GBP Posts  <br>- Uploads media  <br>- Sets post text  <br>- Schedules post  <br>- Reports success/failure |
-| 1.3 | **Shared DOM Utils Hardening** | 🔴 Not Started | Add retry logic, wait-for-network-idle, and better selectors for React-controlled inputs | - `waitForElement` has configurable retries  <br>- `setDateTimeInput` handles more React edge cases  <br>- `uploadMedia` waits for processing spinner  <br>- All utilities have typed error returns |
-| 1.4 | **Error Resilience** | 🔴 Not Started | Add exponential backoff for API polling, circuit breaker for platform failures, detailed error telemetry | - Polling backoff: 1min → 2min → 5min after consecutive failures  <br>- Circuit breaker: skip a platform after 3 consecutive failures  <br>- Errors stored in extension storage with timestamps  <br>- Popup shows last error per platform |
-| 1.5 | **Popup UI Improvements** | 🔴 Not Started | Show per-platform status, last success/failure per platform, manual retry buttons | - Popup lists all platforms with status icons  <br>- Shows last successful schedule time per platform  <br>- Shows last error per platform (expandable)  <br>- "Retry Now" button to force re-poll  <br>- "Clear Errors" button |
+| 1.3 | **Shared DOM Utils Hardening** | ✅ Done | Add retry logic, wait-for-network-idle, and better selectors for React-controlled inputs | - `waitForElement` has configurable retries  <br>- `setDateTimeInput` handles more React edge cases  <br>- `uploadMedia` waits for processing spinner  <br>- All utilities have typed error returns |
+| 1.4 | **Error Resilience** | ✅ Done | Add exponential backoff for API polling, circuit breaker for platform failures, detailed error telemetry | - Polling backoff: 1min → 2min → 5min after consecutive failures  <br>- Circuit breaker: skip a platform after 3 consecutive failures  <br>- Errors stored in extension storage with timestamps  <br>- Popup shows last error per platform |
+| 1.5 | **Popup UI Improvements** | ✅ Done | Show per-platform status, last success/failure per platform, manual retry buttons | - Popup lists all platforms with status icons  <br>- Shows last successful schedule time per platform  <br>- Shows last error per platform (expandable)  <br>- "Retry Now" button to force re-poll  <br>- "Clear Errors" button |
+
+> **Phase 1 gap fixes (login detection + errorIndicator wiring)** also completed — see changelog `2026-07-13`.
 
 ---
 
@@ -253,6 +255,7 @@ A task is considered **Done** when:
 |------|--------|
 | 2026-06-26 | Initial roadmap document created. Status: Phase 1 in progress. |
 | 2026-07-13 | Added execution plan ROADMAP_STEP.md; sub-tasks 1.3, 1.4, 1.5 and gap fixes moving out of Not Started. |
+| 2026-07-13 | Phase 1 foundation landed: 1.3 (DOM utils hardening — typed errors, retries, React edges, processing-wait), 1.4 (per-platform telemetry, circuit breaker, exponential poll backoff), 1.5 (per-platform popup UI + Retry Now / Clear Errors handlers), and gap fixes 4.i/4.ii (login detection + errorIndicator wiring) on Facebook + Instagram. Vitest infrastructure added to `pages/content` and `chrome-extension`; 35 unit tests passing (10 content + 25 background). Type-check and lint green. |
 
 ---
 
