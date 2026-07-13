@@ -7,5 +7,5 @@
     },
     "types": ["chrome", "node"]
   },
-  "include": ["src", "build.mts"]
+  "include": ["src", "build.mts", "vitest.config.ts"]
 }

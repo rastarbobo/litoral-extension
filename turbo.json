@@ -27,6 +27,10 @@
     "type-check": {
       "cache": false
     },
+    "test:unit": {
+      "cache": false,
+      "outputs": []
+    },
     "lint": {
       "cache": false
     },
