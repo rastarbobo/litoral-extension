@@ -104,6 +104,23 @@ const removePlatformFromState = (state: BreakerState, platform: string): Breaker
 };
 
 /**
+ * Used by `isOpen` to auto-close a stale open window: drops only the
+ * `openUntil[platform]` entry so the open block stops being observed. The
+ * consecutive-failure counter is intentionally PRESERVED — only explicit
+ * recovery (`recordSuccess` / `reset`) clears it. Wiping it on auto-close
+ * would silently reset failures-to-reopen to 0 after every 15-min window,
+ * making a recurring platform failure never accumulate past one cycle.
+ */
+const clearOpenUntilForPlatform = (state: BreakerState, platform: string): BreakerState => {
+  const nextOpenUntil = { ...state.openUntil };
+  delete nextOpenUntil[platform];
+  return {
+    ...state,
+    openUntil: nextOpenUntil,
+  };
+};
+
+/**
  * Per-platform circuit breaker.
  *
  * Each platform maintains independent failure counts and open windows. The
@@ -133,9 +150,9 @@ class CircuitBreaker {
       return true;
     }
     // Auto-close stale entry. We already hold the latest state we observed;
-    // strip just this platform's keys without expanding the surface area of
-    // the read into a read-modify-write that could race with concurrent calls.
-    await setBreakerState(removePlatformFromState(state, platform));
+    // strip just this platform's stale `openUntil` key — preserving the
+    // consecutive-failure counter (see clearOpenUntilForPlatform for why).
+    await setBreakerState(clearOpenUntilForPlatform(state, platform));
     return false;
   }
 
