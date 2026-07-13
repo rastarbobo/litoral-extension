@@ -1,4 +1,5 @@
 import { processPendingSchedules } from './scheduling-orchestrator';
+import { API_BASE_URL } from '../config';
 import { extensionAuthStorage, extensionPollStorage } from '@extension/storage';
 import type {
   CampaignPayload,
@@ -15,16 +16,17 @@ const POLL_INTERVAL_MINUTES = 20;
 const MAX_CONSECUTIVE_FAILURES = 6;
 const BADGE_AUTH_REQUIRED = '🔑';
 const BADGE_ERROR = '!';
-const API_BASE_URL = (typeof __API_BASE_URL !== 'undefined' ? __API_BASE_URL : 'https://litoral.agency') as string;
 
 // ─── Alarm Lifecycle ─────────────────────────────────────
 
+// persistAcrossSessions is omitted intentionally: the @types/chrome definition for
+// AlarmCreateInfo doesn't include it, and chrome.runtime.onStartup (below) ensures the
+// alarm recreates after a browser restart.
 const createPollAlarm = async (): Promise<void> => {
   const existing = await chrome.alarms.get(POLL_ALARM_NAME);
   if (!existing) {
     await chrome.alarms.create(POLL_ALARM_NAME, {
       periodInMinutes: POLL_INTERVAL_MINUTES,
-      persistAcrossSessions: true,
     });
     console.log('[Litoral] Poll alarm created: every', POLL_INTERVAL_MINUTES, 'minutes');
   }

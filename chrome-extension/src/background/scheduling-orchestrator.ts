@@ -21,6 +21,7 @@
  * - Content scripts only message the background worker — no direct API calls
  */
 
+import { API_BASE_URL } from '../config';
 import { extensionPollStorage, extensionAuthStorage } from '@extension/storage';
 import type {
   CampaignPayload,
@@ -32,7 +33,6 @@ import type {
 
 // ─── Constants ───────────────────────────────────────────
 
-const API_BASE_URL = (typeof __API_BASE_URL !== 'undefined' ? __API_BASE_URL : 'https://litoral.agency') as string;
 const SCHEDULING_TIMEOUT_MS = 90_000; // 90 seconds per campaign
 const MAX_CAMPAIGNS_PER_CYCLE = 2;
 const INTER_CAMPAIGN_DELAY_MS = 90_000; // 90-second delay between platform switches
