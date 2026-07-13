@@ -22,8 +22,8 @@ import {
   setTextContent,
   setDateTimeInput,
   uploadMedia,
-  waitForMediaProcessing,
   delay,
+  DomUtilError,
 } from '../../shared/dom-utils';
 import type { CampaignPayload, ContentScriptMessage, BackgroundToContentMessage } from '@extension/shared';
 
@@ -108,12 +108,9 @@ const scheduleOnInstagram = async (campaign: CampaignPayload): Promise<void> => 
 
   sendProgress(campaign.campaignId, 'Uploading media');
   await waitForElement(SELECTORS.mediaUploadInput, 15_000);
-  await uploadMedia(SELECTORS.mediaUploadInput, campaign.assetUrl);
-
-  sendProgress(campaign.campaignId, 'Waiting for media processing');
-  // Instagram processes media for 5-15 seconds
-  await delay(5_000);
-  await waitForMediaProcessing(30_000);
+  await uploadMedia(SELECTORS.mediaUploadInput, campaign.assetUrl, {
+    waitForProcessing: { timeoutMs: 30_000 },
+  });
 
   sendProgress(campaign.campaignId, 'Writing caption');
   await waitForElement(SELECTORS.captionTextArea, 10_000);
@@ -176,7 +173,12 @@ chrome.runtime.onMessage.addListener((message: BackgroundToContentMessage, _send
       .catch((error: unknown) => {
         // Tab unload already sent SCHEDULE_FAILED — don't send duplicate
         if (isUnloading) return;
-        const reason = error instanceof Error ? error.message : 'Unknown Instagram scheduling error';
+        const reason =
+          error instanceof DomUtilError
+            ? `${error.code}${error.selector ? `: ${error.selector}` : ''}`
+            : error instanceof Error
+              ? error.message
+              : 'Unknown Instagram scheduling error';
         console.error('[Litoral] Instagram scheduling failed:', reason);
         // Guard against duplicate send if beforeunload handler already ran
         if (currentCampaignId !== campaign.campaignId) return;
