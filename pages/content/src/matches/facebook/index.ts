@@ -24,6 +24,8 @@ import {
   setDateTimeInput,
   uploadMedia,
   delay,
+  detectLogin,
+  waitForOutcome,
   DomUtilError,
 } from '../../shared/dom-utils';
 import type { CampaignPayload, ContentScriptMessage, BackgroundToContentMessage } from '@extension/shared';
@@ -63,6 +65,8 @@ const SELECTORS = {
   successIndicator: '[role="dialog"][aria-label*="Post scheduled"]',
   /** Error dialog */
   errorIndicator: '[role="dialog"][aria-label*="error"], [role="alert"]',
+  /** DOM element present only when the user is authenticated (e.g., composer entry point / avatar). */
+  authenticatedMarker: '[role="navigation"], [aria-label*="account" i]',
 } as const;
 
 // ─── Campaign tracking for tab close detection ───────────
@@ -108,6 +112,14 @@ let isUnloading = false;
  */
 const scheduleOnFacebook = async (campaign: CampaignPayload): Promise<void> => {
   currentCampaignId = campaign.campaignId;
+
+  // Login gate: bail fast with LOGIN_REQUIRED if the authenticated-mode selector
+  // doesn't appear. Avoids the slow wait-for-composer timeout on logged-out pages.
+  if (!(await detectLogin({ authenticatedSelector: SELECTORS.authenticatedMarker, timeoutMs: 5_000 }))) {
+    throw new DomUtilError('LOGIN_REQUIRED', `${campaign.platform} login required`, {
+      selector: SELECTORS.authenticatedMarker,
+    });
+  }
 
   sendProgress(campaign.campaignId, 'Opening post composer');
   await waitForElement(SELECTORS.createPostButton, 10_000);
@@ -156,7 +168,15 @@ const scheduleOnFacebook = async (campaign: CampaignPayload): Promise<void> => {
   clickElement(SELECTORS.scheduleButton);
 
   sendProgress(campaign.campaignId, 'Waiting for confirmation');
-  await waitForElement(SELECTORS.successIndicator, 30_000);
+  await waitForOutcome({
+    successSelector: SELECTORS.successIndicator,
+    failureSelector: SELECTORS.errorIndicator,
+    timeoutMs: 30_000,
+    extractFailureReason: el => {
+      const txt = (el as HTMLElement).textContent?.trim();
+      return txt ? `Platform error: ${txt}` : 'Platform error indicator shown';
+    },
+  });
 
   // Success!
   chrome.runtime.sendMessage({
