@@ -252,6 +252,7 @@ A task is considered **Done** when:
 | Date | Change |
 |------|--------|
 | 2026-06-26 | Initial roadmap document created. Status: Phase 1 in progress. |
+| 2026-07-13 | Added execution plan ROADMAP_STEP.md; sub-tasks 1.3, 1.4, 1.5 and gap fixes moving out of Not Started. |
 
 ---
 
