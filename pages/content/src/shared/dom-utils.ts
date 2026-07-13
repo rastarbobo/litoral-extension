@@ -359,6 +359,63 @@ const uploadMedia = async (inputSelector: string, assetUrl: string, opts?: Uploa
   }
 };
 
+/**
+ * Detect whether the user is authenticated on a platform by probing for a
+ * "logged-in" anchor selector within `timeoutMs`. Returns true when the
+ * authenticated-mode selector is present; returns false otherwise.
+ *
+ * Does NOT throw — callers decide how to react when login is missing.
+ */
+const detectLogin = async (opts: { authenticatedSelector: string; timeoutMs?: number }): Promise<boolean> => {
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const el = document.querySelector(opts.authenticatedSelector);
+    if (el) return true;
+    await delay(500);
+  }
+  return false;
+};
+
+/**
+ * Race success vs. failure selectors. Resolves with `{ success: true }` when the
+ * success selector wins, or rejects with DomUtilError('TEXT_SET_FAILED', <reason>) when
+ * the failure selector wins. Times out with DomUtilError('TIMEOUT') after
+ * `timeoutMs` (default 30s).
+ */
+const waitForOutcome = async (opts: WaitForOutcomeOptions): Promise<{ success: true }> => {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const start = Date.now();
+  const pollIntervalMs = 500;
+
+  while (Date.now() - start < timeoutMs) {
+    const successEl = document.querySelector(opts.successSelector);
+    if (successEl) {
+      return { success: true };
+    }
+    if (opts.failureSelector) {
+      const failureEl = document.querySelector(opts.failureSelector);
+      if (failureEl) {
+        const reason = opts.extractFailureReason ? opts.extractFailureReason(failureEl) : 'Platform error indicator';
+        throw new DomUtilError('TEXT_SET_FAILED', reason, { selector: opts.failureSelector });
+      }
+    }
+    await delay(pollIntervalMs);
+  }
+
+  throw new DomUtilError('TIMEOUT', `Confirmation timeout — no success or error indicator after ${timeoutMs}ms`, {
+    timeoutMs,
+  });
+};
+
+export interface WaitForOutcomeOptions {
+  successSelector: string;
+  failureSelector?: string;
+  timeoutMs?: number;
+  /** Optional function to extract a human-readable failure reason from the matched error element. */
+  extractFailureReason?: (el: Element) => string;
+}
+
 export {
   delay,
   waitForElement,
@@ -368,6 +425,8 @@ export {
   setDateTimeInput,
   uploadMedia,
   waitForMediaProcessing,
+  detectLogin,
+  waitForOutcome,
   DomUtilError,
 };
 export type { DomUtilErrorCode, WaitForElementOptions, MediaProcessingOptions, UploadMediaOptions };
