@@ -233,20 +233,25 @@ describe('facebook content script', () => {
     });
   });
 
-  it('F8: beforeunload mid-schedule emits exactly one SCHEDULE_FAILED(tab_closed) and the catch guard suppresses a duplicate', async () => {
+  it('F8: beforeunload mid-schedule emits exactly one SCHEDULE_FAILED(tab_closed) — no duplicate, no late SCHEDULE_COMPLETE', async () => {
     const flush = useFakeTimers();
     const campaign = baseCampaign();
-    buildFacebookFixture({ outcome: 'success' });
+    // 'pending' reveals nothing on the Schedule-button click — the scheduler
+    // parks in waitForOutcome (30s poll loop), so beforeunload can fire
+    // mid-flight without racing a terminal outcome.
+    buildFacebookFixture({ outcome: 'pending' });
 
     __dispatchStartScheduling(campaign);
-    // Drive partway through — past login and composer open, before completion.
-    await flush(3_000);
+    // Drive past the composer open + caption + publish dropdown + schedule
+    // button click so the scheduler reaches waitForOutcome and parks.
+    await flush(5_000);
 
     // The content script registers a `window` beforeunload listener at top
     // level; dispatching it flips `isUnloading` and sends SCHEDULE_FAILED.
     window.dispatchEvent(new Event('beforeunload'));
 
-    // Let the in-flight scheduler finish (and its catch attempt) under fake time.
+    // Flush past the 30s waitForOutcome timeout so the in-flight scheduler
+    // resolves/rejects and its catch arm runs under fake time.
     await flush(35_000);
 
     const tabClosedMessages = __getSent().filter(
@@ -259,9 +264,10 @@ describe('facebook content script', () => {
     // — beforeunload nulled currentCampaignId, so the catch must NOT have
     // emitted a SECOND SCHEDULE_FAILED.
     expect(__getSent().filter(m => m.type === 'SCHEDULE_FAILED')).toHaveLength(1);
-    // NOTE: the success path does NOT check `isUnloading`, so a SCHEDULE_COMPLETE
-    // may still fire if the scheduler catches up after beforeunload. That's an
-    // observed gap in the script (tracked as a follow-up), not a contract.
+    // The success path now guards on `isUnloading` too: even if waitForOutcome
+    // were to resolve, the in-flight scheduler must NOT emit a contradictory
+    // SCHEDULE_COMPLETE after the tab_closed failure.
+    expect(__getLastOfType('SCHEDULE_COMPLETE')).toBeUndefined();
   });
 
   it('F9: sendProgress swallows a rejected sendMessage without breaking the scheduling flow', async () => {

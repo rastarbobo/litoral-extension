@@ -155,6 +155,13 @@ const scheduleOnInstagram = async (campaign: CampaignPayload): Promise<void> => 
     },
   });
 
+  // If a beforeunload fired mid-schedule, the unload handler already sent
+  // SCHEDULE_FAILED(tab_closed) and nulled currentCampaignId. The in-flight
+  // scheduler kept running and may still reach this success branch — do NOT
+  // emit a contradictory SCHEDULE_COMPLETE after the tab_closed failure.
+  // Mirrors the `if (isUnloading) return;` guard in the catch arm below.
+  if (isUnloading) return;
+
   // Success!
   chrome.runtime.sendMessage({
     type: 'SCHEDULE_COMPLETE',

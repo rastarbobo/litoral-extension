@@ -69,12 +69,14 @@ export const buildInstagramFixture = ({ outcome = 'success' }: { outcome?: Outco
           dialog.setAttribute('aria-label', 'Scheduled');
           dialog.textContent = 'Your reels are scheduled';
           document.body.appendChild(dialog);
-        } else {
+        } else if (outcome === 'error') {
           const alert = document.createElement('div');
           alert.setAttribute('role', 'alert');
           alert.textContent = 'We could not schedule your post.';
           document.body.appendChild(alert);
         }
+        // outcome === 'pending': reveal nothing — the scheduler parks in
+        // waitForOutcome so a test can fire beforeunload mid-flight.
       });
     });
   });

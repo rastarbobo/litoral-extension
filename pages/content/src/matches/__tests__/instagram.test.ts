@@ -199,13 +199,16 @@ describe('instagram content script', () => {
     });
   });
 
-  it('I8: beforeunload mid-schedule emits exactly one SCHEDULE_FAILED(tab_closed) and the catch guard suppresses a duplicate', async () => {
+  it('I8: beforeunload mid-schedule emits exactly one SCHEDULE_FAILED(tab_closed) — no duplicate, no late SCHEDULE_COMPLETE', async () => {
     const flush = useFakeTimers();
     const campaign = baseCampaign();
-    buildInstagramFixture({ outcome: 'success' });
+    // 'pending' parks the scheduler in waitForOutcome so beforeunload fires
+    // mid-flight without racing a terminal outcome.
+    buildInstagramFixture({ outcome: 'pending' });
 
     __dispatchStartScheduling(campaign);
-    await flush(2_500);
+    // Drive past login + composer + caption + schedule toggle + schedule button.
+    await flush(4_000);
 
     window.dispatchEvent(new Event('beforeunload'));
     await flush(35_000);
@@ -217,5 +220,8 @@ describe('instagram content script', () => {
     expect(tabClosedMessages).toHaveLength(1);
     // Catch guard suppresses the duplicate SCHEDULE_FAILED.
     expect(__getSent().filter(m => m.type === 'SCHEDULE_FAILED')).toHaveLength(1);
+    // The success path now guards on `isUnloading` too: the in-flight scheduler
+    // must NOT emit a contradictory SCHEDULE_COMPLETE after the tab_closed failure.
+    expect(__getLastOfType('SCHEDULE_COMPLETE')).toBeUndefined();
   });
 });

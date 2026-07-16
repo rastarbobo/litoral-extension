@@ -85,13 +85,15 @@ export const buildFacebookFixture = ({ outcome = 'success' }: { outcome?: Outcom
               dialog.setAttribute('aria-label', 'Post scheduled');
               dialog.textContent = 'Your post is scheduled';
               document.body.appendChild(dialog);
-            } else {
+            } else if (outcome === 'error') {
               // Error path: ship a role="alert" so it wins the waitForOutcome race
               const alert = document.createElement('div');
               alert.setAttribute('role', 'alert');
               alert.textContent = 'Something went wrong while scheduling.';
               document.body.appendChild(alert);
             }
+            // outcome === 'pending': reveal nothing — the scheduler parks in
+            // waitForOutcome so a test can fire beforeunload mid-flight.
           });
         });
       });
