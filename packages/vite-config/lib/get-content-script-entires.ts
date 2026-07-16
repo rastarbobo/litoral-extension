@@ -7,15 +7,26 @@ export const getContentScriptEntries = (matchesDir: string) => {
 
   entries.forEach((folder: string) => {
     const filePath = resolve(matchesDir, folder);
-    const isFolder = statSync(filePath).isDirectory();
-    const haveIndexTsFile = readdirSync(filePath).includes('index.ts');
-    const haveIndexTsxFile = readdirSync(filePath).includes('index.tsx');
 
-    if (isFolder && !(haveIndexTsFile || haveIndexTsxFile)) {
-      throw new Error(`${folder} in \`matches\` doesn't have index.ts or index.tsx file`);
-    } else {
-      entryPoints[folder] = resolve(filePath, haveIndexTsFile ? 'index.ts' : 'index.tsx');
+    // `matches/` may contain non-entry content — README files, co-located test
+    // directories (e.g. `__tests__/`), or future support dirs. Skip any entry
+    // that isn't a directory; otherwise `readdirSync` below throws ENOTDIR on
+    // files like README.md. Only directories carrying index.ts/tsx are real
+    // content-script matches; the rest are intentionally ignored.
+    if (!statSync(filePath).isDirectory()) {
+      return;
     }
+
+    const siblings = readdirSync(filePath);
+    const haveIndexTsFile = siblings.includes('index.ts');
+    const haveIndexTsxFile = siblings.includes('index.tsx');
+
+    if (!(haveIndexTsFile || haveIndexTsxFile)) {
+      // A sub-directory with no entry point (e.g. test fixtures) isn't a
+      // content-script match — skip it rather than failing the whole build.
+      return;
+    }
+    entryPoints[folder] = resolve(filePath, haveIndexTsFile ? 'index.ts' : 'index.tsx');
   });
 
   return entryPoints;
