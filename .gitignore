@@ -23,3 +23,7 @@ tsconfig.tsbuildinfo
 
 # compiled
 **/tailwind-output.css
+
+# stray dev logs (server/output rotators from local tooling)
+/*.log
+.opencode/rotator.log
