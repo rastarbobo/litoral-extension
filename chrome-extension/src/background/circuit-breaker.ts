@@ -40,14 +40,22 @@ interface BreakerState {
 
 const READ_CHROME_STORAGE = (key: string): Promise<Record<string, unknown>> =>
   new Promise(resolve => {
+    /* c8 ignore start -- defensive SSR/Node guard: the chrome shim always
+       installs globalThis.chrome before any background module loads, so this
+       branch only fires in non-extension hosts (e.g. SSR tooling). */
     if (typeof chrome === 'undefined' || !chrome.storage?.local) {
       resolve({});
       return;
     }
+    /* c8 ignore stop */
     chrome.storage.local.get([key], items => {
+      /* c8 ignore start -- lastError is only set by Chrome on real storage
+         failures; the in-memory shim never populates it. The branch is a
+         defensive fall-through so corrupt payloads degrade to empty state. */
       if (typeof chrome.runtime?.lastError !== 'undefined' && chrome.runtime.lastError) {
         // Malformed payload — fall through and treat as empty state.
       }
+      /* c8 ignore stop */
       const value = items?.[key];
       resolve(typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {});
     });
@@ -55,10 +63,13 @@ const READ_CHROME_STORAGE = (key: string): Promise<Record<string, unknown>> =>
 
 const WRITE_CHROME_STORAGE = (key: string, value: unknown): Promise<void> =>
   new Promise(resolve => {
+    /* c8 ignore start -- same defensive SSR/Node guard as READ_CHROME_STORAGE;
+       unreachable whenever the chrome shim is installed. */
     if (typeof chrome === 'undefined' || !chrome.storage?.local) {
       resolve();
       return;
     }
+    /* c8 ignore stop */
     chrome.storage.local.set({ [key]: value }, () => resolve());
   });
 

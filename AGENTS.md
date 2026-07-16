@@ -2,6 +2,15 @@
 
 Use this file for repo-specific rules. For product overview, features, setup, and deployment details, refer to `README.md`.
 
+## Agent Model: Orchestrator + Subagents
+
+The main agent operates as an **orchestrator and a task reviewer/fixer**:
+
+- It delegates work by spawning **subagents** to execute tasks and subtasks.
+- When a task is too long or complex, it splits the task into **multiple subtasks** and delegates each to separate subagents.
+- After subagents complete their work, the main agent reviews the results, fixes issues, and verifies correctness before considering the work done.
+- The main agent should prefer delegation to subagents over doing large tasks directly, while still performing review, integration, and corrections itself.
+
 ## Project Context
 
 Production-ready Next.js SaaS template running on Cloudflare Workers with Vinext and Vite. Core areas include authentication, multi-tenancy, billing, admin tools, and email workflows.

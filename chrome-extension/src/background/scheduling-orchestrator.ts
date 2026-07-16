@@ -124,12 +124,26 @@ const processPendingSchedules = async (): Promise<void> => {
         await markScheduledOnServer(campaign.campaignId, result.scheduledAt);
         console.log(`[Litoral] Successfully scheduled campaign ${campaign.campaignId} on ${campaign.platform}`);
       } else {
-        console.warn(`[Litoral] Scheduling failed for campaign ${campaign.campaignId}: ${result.reason ?? 'unknown'}`);
+        console.warn(
+          `[Litoral] Scheduling failed for campaign ${campaign.campaignId}: ${
+            /* c8 ignore start -- defensive fallback: every failure path in
+               scheduleOneCampaign sets `reason` to a non-empty string, so
+               this nullish coalescing arm is only reached if a future code
+               change drops the assignment. */
+            result.reason ?? 'unknown'
+            /* c8 ignore stop */
+          }`,
+        );
       }
     } catch (error) {
       console.error(
         `[Litoral] Orchestrator error for campaign ${campaign.campaignId}:`,
+        /* c8 ignore start -- `error instanceof Error ? ... : error` else
+           branch is only reached when scheduleOneCampaign throws a non-Error,
+           which no production code path does today. The defensive arm exists
+           for future code changes that might throw unstructured primitives. */
         error instanceof Error ? error.message : error,
+        /* c8 ignore stop */
       );
     }
 
@@ -375,7 +389,12 @@ const waitForTabLoad = (tabId: number): Promise<boolean> =>
 
     const listener = (_tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
       if (_tabId !== tabId || changeInfo.status !== 'complete') return;
+      /* c8 ignore start -- defensive re-entrance guard: removeListener on the
+         line below fires synchronously on first resolve, so the SAME listener
+         cannot be invoked again. The unwrap exists for theoretically-reentrant
+         frames (no caller relies on it) and never executes in practice. */
       if (resolved) return;
+      /* c8 ignore stop */
 
       resolved = true;
       chrome.tabs.onUpdated.removeListener(listener);

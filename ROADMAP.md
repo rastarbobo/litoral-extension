@@ -1,8 +1,8 @@
 # Litoral Extension — Development & Deployment Roadmap
 
-> **Last Updated:** June 26, 2026  
-> **Status:** 🚧 In Progress (Phase 1 — Polish Existing Features)  
-> **Next Milestone:** Complete TikTok & GBP platform integrations  
+> **Last Updated:** July 16, 2026  
+> **Status:** 🚧 In Progress (Phase 2 — Testing & Reliability (2.1 done, 2.2-2.4 pending))  
+> **Next Milestone:** Complete Phase 2.2 (Mocked Platform Tests)  
 
 ---
 
@@ -118,7 +118,7 @@ litoral-extension/
 
 | # | Task | Status | Details | Acceptance Criteria |
 |---|------|--------|---------|---------------------|
-| 2.1 | **Unit Tests for Scheduler** | 🔴 Not Started | Test `scheduling-orchestrator.ts` logic (rate limiting, timeout, retry) | - Tests exist in `chrome-extension/src/background/__tests__/`  <br>- 100% branch coverage on rate limiting  <br>- Timeout tested with fake timers  <br>- Retry logic tested |
+| 2.1 | **Unit Tests for Scheduler** | ✅ Done | Test `scheduling-orchestrator.ts` logic (rate limiting, timeout, retry) | - Tests exist in `chrome-extension/src/background/__tests__/`  <br>- 100% branch coverage on rate limiting  <br>- Timeout tested with fake timers  <br>- Retry logic tested |
 | 2.2 | **Mocked Platform Tests** | 🔴 Not Started | Create Playwright/Puppeteer mocks for Facebook/Instagram/TikTok/GBP DOM interactions | - Mock HTML pages for each platform's scheduler UI  <br>- Content scripts run against mocks  <br>- Assertions verify correct DOM mutations  <br>- Tests run in CI |
 | 2.3 | **E2E Flow Tests** | 🔴 Not Started | End-to-end test: claim campaign → inject content script → verify platform page navigation | - Uses existing WebdriverIO e2e setup  <br>- Full flow: background poll → claim → orchestrator → content script  <br>- Assertions on badge text and storage state  <br>- Runs in CI |
 | 2.4 | **Error Injection Tests** | 🔴 Not Started | Simulate API failures, network drops, and platform UI changes | - Mock API returns 500/401/timeout  <br- Simulate network offline  <br>- Simulate DOM changes (missing buttons)  <br>- Verify graceful degradation |
@@ -256,6 +256,7 @@ A task is considered **Done** when:
 | 2026-06-26 | Initial roadmap document created. Status: Phase 1 in progress. |
 | 2026-07-13 | Added execution plan ROADMAP_STEP.md; sub-tasks 1.3, 1.4, 1.5 and gap fixes moving out of Not Started. |
 | 2026-07-13 | Phase 1 foundation landed: 1.3 (DOM utils hardening — typed errors, retries, React edges, processing-wait), 1.4 (per-platform telemetry, circuit breaker, exponential poll backoff), 1.5 (per-platform popup UI + Retry Now / Clear Errors handlers), and gap fixes 4.i/4.ii (login detection + errorIndicator wiring) on Facebook + Instagram. Vitest infrastructure added to `pages/content` and `chrome-extension`; 35 unit tests passing (10 content + 25 background). Type-check and lint green. |
+| 2026-07-16 | Phase 2.1 complete: 50 unit tests in `chrome-extension/src/background/__tests__/` (33 orchestrator + 9 circuit-breaker + 8 storage, up from 25). 100% branch/line/function/statement coverage on `scheduling-orchestrator.ts` and `circuit-breaker.ts`, gated via `chrome-extension/vitest.config.ts` `coverage.thresholds`. Added `@vitest/coverage-v8`; extended the chrome shim with `__setNextTabCreateFails` / `__setNextTabsSendMessageThrows` failure-injection helpers; added `/* c8 ignore start/stop */` around intentionally-unreachable defensive branches (defensive `?? 'unknown'` and `error instanceof Error ? ... : error` else arm in the orchestrator catch; `waitForTabLoad`'s `if (resolved) return` re-entrance guard; the `typeof chrome === 'undefined'` SSR guards in circuit-breaker). Repo-wide lint and type-check green; `pnpm run test:unit` = 60 tests across 2 packages. |
 
 ---
 

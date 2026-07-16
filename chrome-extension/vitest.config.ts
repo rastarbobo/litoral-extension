@@ -20,6 +20,25 @@ export default defineConfig({
     include: ['src/background/__tests__/**/*.test.ts'],
     setupFiles: ['src/background/__tests__/setup.ts'],
     testTimeout: 10_000,
+    coverage: {
+      provider: 'v8',
+      // ROADMAP Phase 2.1 acceptance requires 100% branch coverage on rate
+      // limiting (the scheduling orchestrator + circuit breaker). Other files
+      // (index.ts poll loop, storage) are out of scope for 2.1 — covered
+      // separately in extension-poll-storage.test.ts and integration tests.
+      include: ['src/background/scheduling-orchestrator.ts', 'src/background/circuit-breaker.ts'],
+      exclude: ['src/**/__tests__/**', 'src/**/*.d.ts'],
+      reporter: ['text', 'json', 'html'],
+      reportsDirectory: 'coverage',
+      // 100% on the orchestrator's branches is the locked-in Phase 2.1 target.
+      // We assert this gate so regressions in rate-limit logic fail CI.
+      thresholds: {
+        branches: 100,
+        lines: 100,
+        functions: 100,
+        statements: 100,
+      },
+    },
   },
   resolve: {
     alias: {

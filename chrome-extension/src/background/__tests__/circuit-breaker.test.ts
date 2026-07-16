@@ -112,4 +112,43 @@ describe('CircuitBreaker', () => {
     expect(BREAKER_THRESHOLD).toBe(3);
     expect(BREAKER_OPEN_DURATION_MS).toBe(15 * 60 * 1000);
   });
+
+  // ─── reset() no-op branch (circuit-breaker.ts:207) ───────────────────
+  it('reset() is a no-op when the platform has no recorded failures or open window', async () => {
+    // Seed state for an UNRELATED platform so the storage key exists and has
+    // data — but the platform we reset must have nothing recorded. Otherwise
+    // the `setBreakerState` would always write lastUpdatedAt back.
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(100_000);
+    const breaker = new CircuitBreaker();
+    await breaker.recordFailure('facebook');
+    const before = await getBreakerState();
+    expect(before.lastUpdatedAt).toBeDefined();
+
+    // reset(tiktok) when tiktok has no entries — must NOT mutate lastUpdatedAt.
+    await breaker.reset('tiktok');
+    const after = await getBreakerState();
+    expect(after.openUntil.tiktok).toBeUndefined();
+    expect(after.consecutiveFailures.tiktok).toBeUndefined();
+    // No write should have been issued — lastUpdatedAt unchanged.
+    expect(after.lastUpdatedAt).toBe(before.lastUpdatedAt);
+
+    nowSpy.mockRestore();
+  });
+
+  // ─── recordSuccess() no-op branch (circuit-breaker.ts:167) ───────────
+  it('recordSuccess is a no-op when the platform has nothing recorded (no lastUpdatedAt write)', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(100_000);
+    const breaker = new CircuitBreaker();
+
+    // Fresh breaker — no entries for instagram.
+    await breaker.recordSuccess('instagram');
+
+    const state = await getBreakerState();
+    expect(state.openUntil).toEqual({});
+    expect(state.consecutiveFailures).toEqual({});
+    // No write happened → lastUpdatedAt stays null on the never-written state.
+    expect(state.lastUpdatedAt).toBeNull();
+
+    nowSpy.mockRestore();
+  });
 });

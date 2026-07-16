@@ -56,6 +56,20 @@ interface CreatedTab {
   url?: string;
 }
 
+/**
+ * Failure-injection toggles per `chrome.tabs` method. Tests flip these to
+ * exercise the orchestrator's defensive branches — the orchestrator must
+ * handle `chrome.tabs.create` returning a falsy/incomplete tab and must not
+ * reject when `chrome.tabs.sendMessage` throws.
+ *
+ * The production `chrome.tabs.create` contract reserves `id === tabs.TAB_ID_NONE`
+ * (i.e. `-1` on most platforms) for failure; production uses a truthy guard
+ * (`if (!tab?.id)`). We model "no tab.id" as `id: undefined` to match the null
+ * guard without conflicting with the `TAB_ID_NONE` sentinel.
+ */
+let __nextTabCreateFails = false;
+let __nextTabsSendMessageThrows = false;
+
 // ─── Internal state (module-scoped so spies/listeners share identity) ───
 
 const storageMap = new Map<string, unknown>();
@@ -245,6 +259,13 @@ const chromeShim = {
   tabs: {
     create: (opts: CreateTabsProps, cb?: (tab: CreatedTab) => void): Promise<CreatedTab> | void => {
       __tabCreateCalls.push({ url: opts.url, active: opts.active });
+      // Modeled failure: chrome.tabs.create resolves with TAB_ID_NONE
+      // equivalent (no usable id) — production guards truthiness on `tab?.id`.
+      if (__nextTabCreateFails) {
+        __nextTabCreateFails = false;
+        const broken: CreatedTab = { id: undefined as unknown as number, status: 'loading', url: opts.url };
+        return dual(cb, broken);
+      }
       const id = __nextTabId++;
       const tab: TabRecord = { id, status: 'loading', url: opts.url };
       tabsMap.set(id, tab);
@@ -264,6 +285,22 @@ const chromeShim = {
       cb?: (response: unknown) => void,
     ): Promise<{ received: boolean }> | void => {
       __tabMessages.push({ id, msg });
+      // Failure injection: production catches this and continues to wait for
+      // the 90s scheduling timeout — the orchestrator must NOT reject.
+      if (__nextTabsSendMessageThrows) {
+        __nextTabsSendMessageThrows = false;
+        const err = new Error('Could not establish connection. Receiving end does not exist.');
+        if (cb) {
+          // Mimic Chrome's callback-style failure: lastError is set, cb is called
+          // with undefined. Production uses the cb-or-promise duality; the
+          // orchestrator awaits the promise form and expects rejection.
+          runtimeLastError = err;
+          cb(undefined);
+          runtimeLastError = undefined;
+          return undefined;
+        }
+        return Promise.reject(err);
+      }
       return dual(cb, { received: true });
     },
     onUpdated: {
@@ -340,6 +377,8 @@ const __resetChromeShim = (): void => {
   __badge.text = '';
   __badge.color = undefined;
   runtimeLastError = undefined;
+  __nextTabCreateFails = false;
+  __nextTabsSendMessageThrows = false;
 };
 
 /**
@@ -400,6 +439,24 @@ const __emitAlarm = (alarm: { name: string }): void => {
   }
 };
 
+/**
+ * Make the next `chrome.tabs.create` call resolve with an unusable tab
+ * (no `id`). Production guards `if (!tab?.id)` and sends a
+ * `tab_creation_failed` schedule result — this injects that path.
+ */
+const __setNextTabCreateFails = (value = true): void => {
+  __nextTabCreateFails = value;
+};
+
+/**
+ * Make the next `chrome.tabs.sendMessage` call reject. Production catches
+ * the rejection and keeps waiting for the 90s scheduling timeout — this
+ * injects the rejected-promise arm of that try/catch.
+ */
+const __setNextTabsSendMessageThrows = (value = true): void => {
+  __nextTabsSendMessageThrows = value;
+};
+
 export {
   chromeShim,
   __resetChromeShim,
@@ -409,6 +466,8 @@ export {
   __emitTabRemoved,
   __emitAlarm,
   __sendRuntimeMessage,
+  __setNextTabCreateFails,
+  __setNextTabsSendMessageThrows,
   // Exposed for tests that assert side effects directly.
   __tabCreateCalls,
   __sentMessages,
