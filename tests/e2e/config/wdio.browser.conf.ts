@@ -62,6 +62,21 @@ const bundledExtension = (await readFile(extPath)).toString('base64');
  * We pin `--headless` (legacy) instead of `--headless=new`. The new headless mode
  * dropped several legacy behaviors including reliable extension loading.
  */
+
+/**
+ * Resolve the Chrome binary path from explicit env overrides only.
+ * Used by chromedriver to point at the Chrome 137 install we set up
+ * via browser-actions/setup-chrome@v1 in CI (which exports CHROME_BIN).
+ * Locally both envs are unset and chromedriver discovers Chrome itself.
+ */
+function resolveChromeBinary(): string | undefined {
+  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
+  if (process.env.CHB_CHROME_BIN) return process.env.CHB_CHROME_BIN;
+  return undefined;
+}
+
+const CHROME_BINARY = resolveChromeBinary();
+
 const chromeCapabilities = {
   browserName: 'chrome',
   acceptInsecureCerts: true,
@@ -75,6 +90,14 @@ const chromeCapabilities = {
       ...(IS_CI ? ['--headless'] : []),
     ],
     prefs: { 'extensions.ui.developer_mode': true },
+    // WHY explicit binary: the CI workflow pins Chrome 137 via
+    // browser-actions/setup-chrome@v1, which exports CHROME_BIN.
+    // Without this pin, chromedriver auto-pairs with the runner's
+    // Chrome 150 system install, which silently ignores the bundled
+    // MV3 extension install (chrome://extensions/ shows itemCount: 0).
+    // Locally CHROME_BIN is unset and chromedriver falls back to WDIO's
+    // default system-Chrome discovery.
+    ...(CHROME_BINARY ? { binary: CHROME_BINARY } : {}),
   },
 };
 
