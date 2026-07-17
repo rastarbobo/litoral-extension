@@ -32,7 +32,8 @@ jobs:
           cache: pnpm
 
       - name: Pin Chrome (137) — Chrome 150 headless silently ignores goog:chromeOptions.extensions
-        uses: browser-actions/setup-chrome@v1
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
         with:
           chrome-version: 137
 
@@ -45,6 +46,8 @@ jobs:
 
       - name: Run E2E tests (${{ matrix.browser }})
         run: pnpm e2e${{ matrix.browser == 'firefox' && ':firefox' || '' }}
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
 
       - name: Restore one random feature and re-run E2E tests
         run: |
@@ -73,4 +76,6 @@ jobs:
 
       - name: Run again E2E tests (${{ matrix.browser }})
         run: pnpm ${{ matrix.browser == 'chrome' && 'e2e' || 'e2e:firefox' }}
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
 
