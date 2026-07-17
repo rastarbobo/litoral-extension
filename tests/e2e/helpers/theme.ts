@@ -12,7 +12,7 @@ export const canSwitchTheme = async () => {
   await expect(app).toBeExisting();
   await expect(toggleThemeButton).toBeExisting();
 
-  const appClasses = await app.getAttribute('class');
+  const appClasses = (await app.getAttribute('class')) ?? '';
   const initialThemeClass = appClasses.includes(LIGHT_THEME_CLASS) ? LIGHT_THEME_CLASS : DARK_THEME_CLASS;
   const afterClickThemeClass = appClasses.includes(LIGHT_THEME_CLASS) ? DARK_THEME_CLASS : LIGHT_THEME_CLASS;
 
