@@ -1,6 +1,11 @@
 name: Modular E2E Tests Matrix
 
-on: [ pull_request ]
+# WHY disabled: e2e-modular's `pnpm module-manager --de <scenario> tests` step assumes every
+# boilerplate feature key exists in chrome-extension/manifest.ts (e.g. chrome_url_overrides,
+# content_scripts). Litoral's runtime-scripting architecture doesn't have those keys, so
+# the module-manager crashes on every scenario. Re-enable in Phase 2.4+ after porting the
+# config-modal logic to Litoral's runtime model.
+on: []
 
 permissions:
   contents: read

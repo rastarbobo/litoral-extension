@@ -11,7 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        browser: [chrome, firefox]
+        # WHY chrome is excluded: Chrome 150 + chromedriver 150 (auto-resolved by WDIO v9's
+        # @puppeteer/browsers on ubuntu-latest) silently ignores goog:chromeOptions.extensions
+        # for MV3 — itemCount=0 + ERR_BLOCKED_BY_CLIENT. see ROADMAP.md Phase 2.3 + upstream
+        # Jonghakseo/chrome-extension-boilerplate-react-vite#1013.
+        # Firefox E2E continues to run; Chrome E2E runs locally on headed Windows until
+        # the chromedriver/Chrome 150 quirk is fixed upstream.
+        browser: [firefox]
     env:
       CEB_CI: true
     steps:
