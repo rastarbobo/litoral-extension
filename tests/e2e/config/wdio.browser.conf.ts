@@ -144,7 +144,14 @@ export const config: WebdriverIO.Config = {
   ...baseConfig,
   capabilities: IS_FIREFOX ? [firefoxCapabilities] : [chromeCapabilities],
 
-  maxInstances: IS_CI ? 10 : 1,
+  // WHY 1 not 10: with `--load-extension=<dir>` the persistent profile dir
+  // (set in chromeCapabilities above) is shared across workers. Chrome refuses
+  // multiple live sessions on the same --user-data-dir, surfacing as
+  // `WebDriverError: invalid session id` from parallel wdio workers. Until we
+  // either (a) generate a per-worker mkdtemp profile dir or (b) drop the shared
+  // profile entirely, sequential CI runs are the simplest defense. 6 specs still
+  // finish in well under a minute.
+  maxInstances: 1,
   logLevel: 'error',
   execArgv: IS_CI ? [] : ['--inspect'],
   before: async ({ browserName }: WebdriverIO.Capabilities, _specs, browser: WebdriverIO.Browser) => {
