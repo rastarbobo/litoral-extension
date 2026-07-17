@@ -27,3 +27,5 @@ tsconfig.tsbuildinfo
 # stray dev logs (server/output rotators from local tooling)
 /*.log
 .opencode/rotator.log
+
+# chore: ci probe marker for Phase 2.3 e2e.yml validation 2026-07-17T06:49:52
