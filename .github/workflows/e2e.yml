@@ -21,5 +21,9 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: pnpm
+      - name: Pin Chrome (137) — Chrome 150 headless silently ignores goog:chromeOptions.extensions
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: 137
       - run: pnpm install --frozen-lockfile --prefer-offline
       - run: pnpm ${{ matrix.browser == 'chrome' && 'e2e' || 'e2e:firefox' }}
