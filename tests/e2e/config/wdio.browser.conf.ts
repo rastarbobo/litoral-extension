@@ -12,8 +12,10 @@ export { STABLE_EXTENSION_ID };
 /**
  * Absolute path to the built extension root (the directory that contains the
  * Vite-emitted `manifest.json` + all page bundles + background.js). This is the
- * directory `chrome-extension/vite.config.mts` writes into (`outDir = ../../dist`)
- * and what `--load-extension=<path>` expects as its argument.
+ * directory `chrome-extension/vite.config.mts` writes into (`outDir = ../../dist`).
+ * We only need it for the early `manifest.json` existence guard below — the
+ * actual extension bytes loaded by Chrome come from the zipped `dist-zip/*.zip`
+ * via `goog:chromeOptions.extensions: [base64]` (see chromeCapabilities below).
  *
  * Resolved from `tests/e2e/config/` upward: tests/e2e/config → tests/e2e → tests → <root>/dist.
  */
@@ -23,14 +25,14 @@ const MANIFEST_PATH = join(DIST_DIR, 'manifest.json');
 if (!existsSync(MANIFEST_PATH)) {
   throw new Error(
     `[wdio.browser.conf] ${MANIFEST_PATH} is missing — run \`pnpm build\` (or \`pnpm zip\`) before \`pnpm e2e\`. ` +
-    `Chrome's --load-extension flag needs a built manifest directory; it cannot load a non-existent extension.`,
+    `The early-fail guard needs a built manifest to confirm the zip step ran.`,
   );
 }
 
 /**
  * Firefox keeps the bundled-base64 mechanism: `installAddOn` in `before` requires
- * the .xpi bytes, so we still read the latest dist-zip artifact here. Chrome no
- * longer uses bundled base64 — see WHY note in chromeCapabilities below.
+ * the .xpi bytes. Chrome now uses the same base64-zip mechanism via
+ * `goog:chromeOptions.extensions` — see WHY note in chromeCapabilities below.
  */
 const extName = IS_FIREFOX ? '.xpi' : '.zip';
 const extensions = await readdir(join(import.meta.dirname, '../../../dist-zip'));
@@ -44,91 +46,35 @@ const extPath = join(import.meta.dirname, `../../../dist-zip/${latestExtension}`
 const bundledExtension = (await readFile(extPath)).toString('base64');
 
 /**
- * WHY --load-extension instead of `goog:chromeOptions.extensions: [base64]`:
+ * WHY goog:chromeOptions.extensions: [base64] (and why not --load-extension):
  *
- * Since Chrome ~138 the bundled-base64 install path silently fails to register
- * the unpacked MV3 extension in WDIO v9 / puppeteer-CDP sessions on both local
- * Windows (Chrome 150) and `ubuntu-latest` CI — `chrome://extensions/` shows the
- * empty `#no-items` state, and the scraper in `tests/e2e/utils/extension-path.ts`
- * throws `Can't call getAttribute on element with selector "extensions-item"`.
- * Upstream boilerplate's own issue #786 covers the same symptom.
+ * The base64 install mechanism routes through chromedriver's extension-install
+ * path, which writes a fresh per-session user-data-dir. That avoids the
+ * shared-profile contention that maxInstances > 1 would otherwise hit, and it
+ * works on Chrome 150 headless on Linux CI (the upstream boilerplate's
+ * mechanism, unchanged since v0.5.0).
  *
- * `--load-extension=<dir>` is the documented unpacked-load mechanism. It requires:
- *  - The directory to contain a valid `manifest.json` (verified above).
- *  - `--headless=new` (Chrome 138+ dropped `--headless` legacy support that
- *    honored `--load-extension`; the new headless mode treats the browser like a
- *    real window and therefore still loads unpacked extensions).
- *  - A persistent `--user-data-dir` (Chrome refuses to install extensions into
- *    the throwaway temp profile WDIO/puppeteer uses by default).
- *  - The companion manifest to carry a `key` field so the extension ID is
- *    deterministic across sessions (otherwise Chrome mints a per-load ID and
- *    every spec has to scrape `chrome://extensions/` to discover it).
+ * `--load-extension=<dir>` + `--headless=new` silently fails to register MV3
+ * unpacked extensions on Chrome 150 Linux headless — `chrome://extensions/`
+ * shows itemCount=0 and any chrome-extension:// URL returns ERR_BLOCKED_BY_CLIENT.
+ * Upstream tracked this as their own open issue #1013 when they archived the repo.
  *
- * See ROADMAP.md Q7 for the full diagnostic trail that led here.
+ * We pin `--headless` (legacy) instead of `--headless=new`. The new headless mode
+ * dropped several legacy behaviors including reliable extension loading.
  */
-/**
- * Resolve the Chrome binary path to hand to puppeteer/WDIO. Without this,
- * WDIO/puppeteer tends to pick `chrome-headless-shell` (a separate, older,
- * MV3-hostile build) for `--headless=new` while falling back to system Chrome
- * for headed runs — producing inexplicable headless-only failures (e.g.
- * `chrome-extension://…` pages are served but their `<title>` reads as the
- * URL itself, because chrome-headless-shell doesn't fully render the page).
- *
- * Precedence: explicit env override (CHROME_BIN / CHB_CHROME_BIN) > a hardcoded
- * Windows Program Files path > the conventional Linux CI path
- * (`/usr/bin/google-chrome`). Returns `undefined` when nothing resolves.
- */
-function resolveChromeBinary(): string | undefined {
-  if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
-  if (process.env.CHB_CHROME_BIN) return process.env.CHB_CHROME_BIN;
-  const candidates = [
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return undefined;
-}
-
-const CHROME_BINARY = resolveChromeBinary();
-
 const chromeCapabilities = {
   browserName: 'chrome',
   acceptInsecureCerts: true,
   'goog:chromeOptions': {
+    extensions: [bundledExtension],
     args: [
       '--disable-web-security',
       '--disable-gpu',
       '--no-sandbox',
       '--disable-dev-shm-usage',
-      // Unpacked MV3 extension load — path MUST be absolute on Windows.
-      `--load-extension=${DIST_DIR}`,
-      // Persistent profile dir so Chrome accepts the unpacked extension.
-      `--user-data-dir=${join(DIST_DIR, '..', '.wdio-chrome-profile')}`,
-      // Suppress the per-ColdStart setup that races when multiple WDIO workers
-      // reuse the same profile dir — known to throw `session not created: failed
-      // to write first run file` on Windows / parallel-cap runs.
-      '--no-first-run',
-      '--no-default-browser-check',
-      // Chrome 138+ dropped `--headless` legacy mode's honors for --load-extension;
-      // `--headless=new` keeps full chrome behavior, including unpacked ext load.
-      ...(IS_CI ? ['--headless=new'] : []),
-      // Safety net for any future Chrome build that gates --load-extension behind
-      // the DisableLoadExtensionCommandLineSwitch feature (announced then unlanded
-      // through 2024-2025). Harmless when the flag is already enabled.
-      '--disable-features=DisableLoadExtensionCommandLineSwitch',
+      ...(IS_CI ? ['--headless'] : []),
     ],
     prefs: { 'extensions.ui.developer_mode': true },
-    // Pin the Chrome binary so headed and headless modes use the same chrome
-    // build — see resolveChromeBinary() above. `undefined` lets WDIO fall back
-    // to its own discovery when no candidate is found.
-    ...(CHROME_BINARY ? { binary: CHROME_BINARY } : {}),
-    // NOTE: `extensions: [base64]` intentionally absent for Chrome. The bundled
-    // base64 mechanism has been broken since Chrome ~138 in WDIO v9 sessions.
   },
 };
 
@@ -144,13 +90,12 @@ export const config: WebdriverIO.Config = {
   ...baseConfig,
   capabilities: IS_FIREFOX ? [firefoxCapabilities] : [chromeCapabilities],
 
-  // WHY 1 not 10: with `--load-extension=<dir>` the persistent profile dir
-  // (set in chromeCapabilities above) is shared across workers. Chrome refuses
-  // multiple live sessions on the same --user-data-dir, surfacing as
-  // `WebDriverError: invalid session id` from parallel wdio workers. Until we
-  // either (a) generate a per-worker mkdtemp profile dir or (b) drop the shared
-  // profile entirely, sequential CI runs are the simplest defense. 6 specs still
-  // finish in well under a minute.
+  // WHY 1 not 10: defense-in-depth. The chromedriver extension-install path
+  // (goog:chromeOptions.extensions base64) uses a fresh user-data-dir per
+  // session, so it should tolerate maxInstances>1, but we have a 6-spec suite
+  // that finishes in well under a minute regardless, so no reason to risk
+  // re-introducing the `invalid session id` regression we previously saw with
+  // the shared --user-data-dir mechanism.
   maxInstances: 1,
   logLevel: 'error',
   execArgv: IS_CI ? [] : ['--inspect'],
