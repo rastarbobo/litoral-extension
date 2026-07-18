@@ -22,6 +22,17 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       bumped: ${{ steps.resolve.outputs.bumped }}
       prev_version: ${{ steps.resolve.outputs.prev_version }}
+      # commit_sha is the post-bump HEAD that downstream `build` + `release`
+      # jobs MUST checkout explicitly so the artifact manifest version and the
+      # archive filename both reflect the new version. If we let the matrix
+      # jobs fall back to github.sha (the workflow-trigger SHA, pre-bump), the
+      # zipper would bake 0.5.0 into manifest.json for a v0.6.0 release -- an
+      # integrity bug that does not surface as long as nobody inspects the
+      # zip's manifest.json against the release tag (that's how v0.6.0 was
+      # shipped with both the wrong archive filename `extension-v0.5.0.zip`
+      # AND the wrong in-manifest version `0.5.0`). Falls back to github.sha
+      # when bumped=false so a no-bump run still has a usable checkout ref.
+      commit_sha: ${{ steps.commit.outputs.commit_sha || github.sha }}
     steps:
       # fetch-depth: 0 — bump_version.sh uses `git describe --tags` and
       # `git log <range>`, both of which need full history + tags. Without
@@ -112,6 +123,13 @@ jobs:
           # steps.resolve.outputs.version for the release step below.
           bare="$(node -p "require('./package.json').version")"
           git commit -m "chore(release): bump version to ${bare} [skip ci]"
+          # Capture the post-bump HEAD SHA so the build matrix + release
+          # jobs can checkout it explicitly via `ref: needs.bump.outputs.commit_sha`.
+          # Without this, GitHub Actions defaults to `github.sha` (the workflow-
+          # trigger SHA, pre-bump), so `pnpm zip` bakes the OLD version into
+          # manifest.json and the artifact filename. See the long comment on
+          # `commit_sha` in the bump-job outputs above.
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "committed=true" >> "$GITHUB_OUTPUT"
       # Push the bump commit back to main. continue-on-error: true is a
       # deliberate fallback: if `main` has branch protection that rejects
@@ -135,10 +153,16 @@ jobs:
           echo "::warning::Failed to push bump commit to main (branch protection or race). The tag/release will proceed using the committed version. The package.json bump commit will need to be retried manually or on the next successful run."
 
   # build — matrix chrome/firefox. Depends on `bump` (not read-version) and
-  # checks out main fresh. Because `bump` pushes BEFORE `build` starts, the
-  # default checkout of main already includes any bumped package.json. This
-  # ordering (bump push → build checkout) matters: if it were reversed the
-  # build would zip with the stale version baked into manifest.ts.
+  # MUST checkout the bumped SHA explicitly via `ref:`. If we let
+  # actions/checkout fall back to `github.sha` (the workflow-trigger SHA,
+  # pre-bump), the matrix jobs would zip with the OLD version baked into
+  # manifest.ts -- which the v0.6.0 release shipped with: artifact filename
+  # `extension-v0.5.0.zip`, manifest.json `version: 0.5.0` inside the zip,
+  # despite the GitHub Release being named `v0.6.0`. The Conventional-Commits
+  # audit on the merge range detected minor (0.5.0 -> 0.6.0), the `bump` job
+  # committed + pushed, but the `build` matrix never re-fetched: GitHub
+  # Actions captures `github.ref` at trigger time and doesn't auto-advance.
+  # `ref: needs.bump.outputs.commit_sha` is the canonical fix.
   build:
     needs: bump
     runs-on: ubuntu-latest
@@ -147,6 +171,17 @@ jobs:
         browser: [chrome, firefox]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Always check out the bumped SHA, never the trigger SHA. Falls
+          # back to `github.sha` when bump=no-op (no bumpable commits in
+          # the range) -- the `bump` job sets `commit_sha` to `github.sha`
+          # in that case too, so this is just belt-and-suspenders.
+          ref: ${{ needs.bump.outputs.commit_sha }}
+          # fetch-depth: 1 is enough for the matrix's zip build -- it does
+          # not need history. The zipper derives the archive filename from
+          # the root `package.json#version` (read via `node -p`), not from
+          # git tags, so a shallow checkout is fine here.
+          fetch-depth: 1
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -167,6 +202,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # `ref:` matters even though `release` does not run `pnpm zip` --
+          # `softprops/action-gh-release@v2` below defaults `target_commitish`
+          # to the local HEAD at tag-create time. Without an explicit `ref:`,
+          # the local HEAD on this job is `github.sha` (the trigger SHA,
+          # pre-bump), so the tag would point at the pre-bump commit and the
+          # release notes generated by `generate_release_notes: true` would
+          # miss the bump commit + any commits between trigger and bump.
+          # With `ref: needs.bump.outputs.commit_sha`, the tag deterministically
+          # lands on the bump commit and `git describe` in the changelog job's
+          # `prev_tag` resolution below sees the same commit-sha the tag points
+          # at (no tag-vs-HEAD skew).
+          ref: ${{ needs.bump.outputs.commit_sha }}
           fetch-depth: 0
       - name: Skip if tag already exists
         id: tag-check
@@ -207,8 +254,16 @@ jobs:
       # this, `git describe` on the just-cut tag's parent would fail to resolve
       # `prev_tag` and we'd silently fall back to the root commit, pulling in
       # the entire history on every release.
+      # `ref: needs.bump.outputs.commit_sha` agrees with the release job's
+      # checkout above so the changelog commit's parent is the bump commit
+      # itself (which means the push below is a clean fast-forward to
+      # origin/main under the no-race case). The `git pull --rebase` in the
+      # push step below is the belt-and-suspenders guard against any
+      # concurrent main-mutation that lands between this checkout and the
+      # push (Dependabot commit, second release.yml race, manual push).
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.bump.outputs.commit_sha }}
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
@@ -255,6 +310,16 @@ jobs:
       # commit's convention and also prevents this workflow from re-triggering
       # itself on the auto-commit (GitHub already doesn't fire push events for
       # GITHUB_TOKEN pushes to the same workflow, but belt-and-suspenders).
+      # The `git pull --rebase origin main` before the push is a defensive
+      # guard: if anything advanced `origin/main` between this job's checkout
+      # and the push (a Dependabot commit, a second concurrent release.yml
+      # run, a manual operator push), the changelog commit is replayed on
+      # top so the push is a clean fast-forward. Without this guard, the
+      # first v0.6.0 release's changelog job failed with
+      # `error: failed to push some refs to ...` (run 29644410074, exit 1).
+      # With the new explicit `ref: needs.bump.outputs.commit_sha` on the
+      # checkout above, this race is much less likely, but defensive rebase
+      # is cheap insurance against the corner cases.
       - name: Commit + push CHANGELOG.md
         if: steps.diff.outputs.changed == 'true'
         run: |
@@ -263,4 +328,5 @@ jobs:
           git add CHANGELOG.md
           bare="$(node -p "require('./package.json').version")"
           git commit -m "docs(changelog): refresh CHANGELOG.md for v${bare} [skip ci]"
+          git pull --rebase origin main
           git push
