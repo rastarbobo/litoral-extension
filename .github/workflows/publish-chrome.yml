@@ -1,0 +1,172 @@
+name: Publish to Chrome Web Store
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'If true, exchange token + validate but skip the final publish API call'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-chrome-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Dark by default: the repo variable ENABLE_STORE_PUBLISH must be set to
+    # the literal string "true" for this job to actually run. Phase 3.2
+    # territory — until the operator resolves Q5 (deploy-to-draft vs
+    # publish-to-public) and lands the four CHROME_* secrets, leave
+    # ENABLE_STORE_PUBLISH unset so this workflow is a guaranteed no-op.
+    if: vars.ENABLE_STORE_PUBLISH == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for `git describe` in version resolve
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --prefer-offline
+      # Rebuild the Chrome MV3 zip deterministically (the zipper is
+      # deterministic per packages/zipper/index.mts — same SHA inputs
+      # produce byte-identical archives). The release.yml `build` job
+      # already produced the same archive for the GitHub Release; we
+      # rebuild here because the `release.published` event does not
+      # have access to the prior workflow run's upload-artifact surface.
+      - run: pnpm zip
+      # Resolve the just-built zip path + version — read from package.json
+      # to match the release pipeline's version (the version-bump commit
+      # already landed on main before the release event fired).
+      - name: Resolve artifact path
+        id: artifact
+        run: |
+          bare="$(node -p "require('./package.json').version")"
+          zip_path="dist-zip/extension-v${bare}.zip"
+          if [[ ! -f "$zip_path" ]]; then
+            echo "::error::Expected Chrome zip at $zip_path not found after \`pnpm zip\`"
+            exit 1
+          fi
+          echo "zip_path=$zip_path" >> "$GITHUB_OUTPUT"
+          echo "version=$bare" >> "$GITHUB_OUTPUT"
+      # Gated on all four Chrome secrets (same set as listing-sync.yml +
+      # the README). Phase 3.2 integration requires the operator to add:
+      #   CHROME_CLIENT_ID, CHROME_CLIENT_SECRET,
+      #   CHROME_REFRESH_TOKEN, CHROME_EXTENSION_ID
+      - name: Upload + publish to Chrome Web Store
+        if: ${{ secrets.CHROME_CLIENT_ID != '' && secrets.CHROME_CLIENT_SECRET != '' && secrets.CHROME_REFRESH_TOKEN != '' && secrets.CHROME_EXTENSION_ID != '' }}
+        env:
+          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          ZIP_PATH: ${{ steps.artifact.outputs.zip_path }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        # Chrome Web Store publish flow (Phase 3.2):
+        #   1. Exchange OAuth2 refresh token for an access token at
+        #      POST https://oauth2.googleapis.com/token
+        #      (grant_type=refresh_token, client_{id,secret}, refresh_token)
+        #   2. Upload the .zip package via PUT to
+        #      https://www.googleapis.com/upload/chromewebstore/v1.1.1/items/{itemId}
+        #      with the ZIP body as application/zip.
+        #   3. Publish: POST https://www.googleapis.com/chromewebstore/v1.1.1/items/{itemId}/publish
+        #      The publishTarget query param controls train:
+        #        - "trustedTesters" = draft / testers-only (Q5 default if undecided)
+        #        - "default" = full public publish (Q5 = publish-to-public)
+        #      This workflow defaults to "trustedTesters" via env
+        #      CHROME_PUBLISH_TARGET below. The operator must explicitly set
+        #      the env to "default" to switch to full publish — failsafe
+        #      against accidental public release while Q5 is still open.
+        #
+        # When DRY_RUN=true (workflow_dispatch only), skip step 3.
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const clientId = process.env.CHROME_CLIENT_ID;
+          const clientSecret = process.env.CHROME_CLIENT_SECRET;
+          const refreshToken = process.env.CHROME_REFRESH_TOKEN;
+          const itemId = process.env.CHROME_EXTENSION_ID;
+          const zipPath = process.env.ZIP_PATH;
+          const dryRun = process.env.DRY_RUN === 'true';
+          const train = process.env.CHROME_PUBLISH_TARGET || 'trustedTesters';
+          (async () => {
+            try {
+              // Step 1: refresh-token -> access token (OAuth2 token endpoint).
+              const tokBody = new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                refresh_token: refreshToken,
+                grant_type: 'refresh_token',
+              });
+              const tokRes = await fetch('https://oauth2.googleapis.com/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: tokBody.toString(),
+              });
+              if (!tokRes.ok) {
+                const txt = await tokRes.text();
+                console.error(`::error::Chrome OAuth2 token exchange failed: ${tokRes.status} ${txt}`);
+                process.exit(1);
+              }
+              const tokJson = await tokRes.json();
+              const accessToken = tokJson.access_token;
+              console.log(`::notice::Chrome OAuth2 token exchange OK (access token length ${accessToken.length})`);
+
+              // Step 2: upload the zip via PUT to the Items resource.
+              const zipBuffer = fs.readFileSync(zipPath);
+              const uploadUrl = `https://www.googleapis.com/upload/chromewebstore/v1.1.1/items/${itemId}`;
+              const upRes = await fetch(uploadUrl, {
+                method: 'PUT',
+                headers: {
+                  'Authorization': `Bearer ${accessToken}`,
+                  'Content-Type': 'application/zip',
+                  'x-goog-api-version': '2',
+                },
+                body: zipBuffer,
+              });
+              if (!upRes.ok) {
+                const txt = await upRes.text();
+                console.error(`::error::Chrome Items upload PUT failed: ${upRes.status} ${txt}`);
+                process.exit(1);
+              }
+              console.log(`::notice::Chrome Items upload OK: ${await upRes.text()}`);
+
+              // Step 3: publish (or skip on dry-run).
+              if (dryRun) {
+                console.log('::notice::DRY_RUN=true — skipping publish call. The package was uploaded but NOT published. Re-run with dry_run=false or trigger via release event to publish.');
+                return;
+              }
+              const pubUrl = `https://www.googleapis.com/chromewebstore/v1.1.1/items/${itemId}/publish?publishTarget=${train}`;
+              const pubRes = await fetch(pubUrl, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${accessToken}`,
+                  'Content-Length': '0',
+                },
+              });
+              if (!pubRes.ok) {
+                const txt = await pubRes.text();
+                console.error(`::error::Chrome Items.publish POST failed (${train}): ${pubRes.status} ${txt}`);
+                process.exit(1);
+              }
+              console.log(`::notice::Chrome Items.publish OK (target=${train}): ${await pubRes.text()}`);
+            } catch (err) {
+              console.error(`::error::Chrome publish script threw: ${err && err.message ? err.message : err}`);
+              process.exit(1);
+            }
+          })();
+          NODE
+      - name: Skip-publish notice (missing secrets)
+        if: ${{ !(secrets.CHROME_CLIENT_ID != '' && secrets.CHROME_CLIENT_SECRET != '' && secrets.CHROME_REFRESH_TOKEN != '' && secrets.CHROME_EXTENSION_ID != '') }}
+        run: |
+          echo "::notice::Skipped Chrome publish — one or more of CHROME_CLIENT_ID / CHROME_CLIENT_SECRET / CHROME_REFRESH_TOKEN / CHROME_EXTENSION_ID is not set. Set ENABLE_STORE_PUBLISH=true + the four CHROME_* secrets to enable."

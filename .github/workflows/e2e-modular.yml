@@ -1,6 +1,11 @@
 name: Modular E2E Tests Matrix
 
-on: [ pull_request_target ]
+# WHY disabled: e2e-modular's `pnpm module-manager --de <scenario> tests` step assumes every
+# boilerplate feature key exists in chrome-extension/manifest.ts (e.g. chrome_url_overrides,
+# content_scripts). Litoral's runtime-scripting architecture doesn't have those keys, so
+# the module-manager crashes on every scenario. Re-enable in Phase 2.4+ after porting the
+# config-modal logic to Litoral's runtime model.
+on: []
 
 permissions:
   contents: read
@@ -31,6 +36,18 @@ jobs:
           node-version-file: '.nvmrc'
           cache: pnpm
 
+      - name: Pin Chrome 137 + matching chromedriver — Chrome 150 headless silently ignores goog:chromeOptions.extensions
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: 137
+          install-chromedriver: true
+
+      - name: Put chromedriver 137 on PATH ahead of system chromedriver
+        run: |
+          cd "$(dirname "${{ steps.setup-chrome.outputs.chromedriver-path }}")"
+          pwd >> "$GITHUB_PATH"
+
       - run: pnpm install --frozen-lockfile --prefer-offline
 
       - name: Configure modules | scenario "${{ matrix.scenario }}"
@@ -40,6 +57,8 @@ jobs:
 
       - name: Run E2E tests (${{ matrix.browser }})
         run: pnpm e2e${{ matrix.browser == 'firefox' && ':firefox' || '' }}
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
 
       - name: Restore one random feature and re-run E2E tests
         run: |
@@ -68,4 +87,6 @@ jobs:
 
       - name: Run again E2E tests (${{ matrix.browser }})
         run: pnpm ${{ matrix.browser == 'chrome' && 'e2e' || 'e2e:firefox' }}
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
 

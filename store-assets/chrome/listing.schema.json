@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "./listing.schema.json",
+  "title": "Chrome Web Store listing metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["external_id", "name", "description", "category"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "external_id": { "type": "string", "description": "Chrome Web Store item ID (32-char lowercase alphanumeric)." },
+    "name": { "type": "string", "maxLength": 75, "description": "Display name of the extension." },
+    "description": {
+      "type": "string",
+      "maxLength": 132,
+      "description": "Listed description. Chrome enforces a 132-char hard limit."
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "PRODUCTIVITY",
+        "DEVELOPER_TOOLS",
+        "SEARCH_TOOLS",
+        "SHOPPING",
+        "SOCIAL_NETWORKING",
+        "COMMUNICATIONS",
+        "PHOTOGRAPHY",
+        "FUN",
+        "WEB_DEVELOPMENT"
+      ]
+    },
+    "icon_url": { "type": ["string", "null"] },
+    "small_tls_logo_url": { "type": ["string", "null"] },
+    "homepage_url": { "type": ["string", "null"], "format": "uri" },
+    "truckfest_url": { "type": ["string", "null"] },
+    "privacy_practice_notes": { "type": ["string", "null"] },
+    "versions": { "type": "array", "items": { "type": "object" } },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": { "id": { "type": "string" }, "upload_id": { "type": "string" } }
+      }
+    }
+  }
+}

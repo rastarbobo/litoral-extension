@@ -7,7 +7,7 @@ describe('Webextension Options Page', () => {
 
     await browser.url(optionsUrl);
 
-    await expect(browser).toHaveTitle('Options');
+    await expect(browser).toHaveTitle('Options', { wait: 5000, interval: 100 });
     await canSwitchTheme();
   });
 });

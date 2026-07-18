@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/GoogleChrome/webstore-api/main/lib/schema/ItemsResource.json",
+  "external_id": "__TODO_EXTENSION_ID__",
+  "name": "Litoral Agency Publisher",
+  "description": "Publishes approved Litoral Agency campaigns to Facebook, Instagram, and Google Business Profile via the operator's logged-in tabs.",
+  "category": "SOCIAL_NETWORKING",
+  "icon_url": "store-assets/chrome/icon-128.png",
+  "small_tls_logo_url": null,
+  "homepage_url": "__TODO__: production dashboard URL - ops to set once the public Litoral Agency dashboard URL is chosen",
+  "truckfest_url": null,
+  "privacy_practice_notes": "Thin client for the Litoral Agency backend. Only makes network requests to https://litoral.agency/api/extension/* (queue, claim, scheduled-mark). Operator JWT in chrome.storage.sync; telemetry + claimed-campaign + circuit-breaker state in chrome.storage.local. Does NOT collect end-user data, embed third-party analytics, or read/transmit page content - only drives the operator's own logged-in tabs. Permissions: alarms, storage, notifications, activeTab, scripting. Empty host_permissions.",
+  "versions": [],
+  "items": [{ "id": "__TODO_EXTENSION_ID__", "upload_id": "__TODO__: auto-populated on upload" }]
+}

@@ -1,6 +1,6 @@
 name: Run E2E Tests
 
-on: [ pull_request_target ]
+on: [ pull_request ]
 
 permissions:
   contents: read
@@ -11,7 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        browser: [chrome, firefox]
+        # WHY chrome is excluded: Chrome 150 + chromedriver 150 (auto-resolved by WDIO v9's
+        # @puppeteer/browsers on ubuntu-latest) silently ignores goog:chromeOptions.extensions
+        # for MV3 — itemCount=0 + ERR_BLOCKED_BY_CLIENT. see ROADMAP.md Phase 2.3 + upstream
+        # Jonghakseo/chrome-extension-boilerplate-react-vite#1013.
+        # Firefox E2E continues to run; Chrome E2E runs locally on headed Windows until
+        # the chromedriver/Chrome 150 quirk is fixed upstream.
+        browser: [firefox]
     env:
       CEB_CI: true
     steps:
@@ -21,5 +27,19 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: pnpm
+      - name: Pin Chrome 137 + matching chromedriver — Chrome 150 headless silently ignores goog:chromeOptions.extensions
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: 137
+          install-chromedriver: true
+      - name: Put chromedriver 137 on PATH ahead of system chromedriver
+        run: |
+          cd "$(dirname "${{ steps.setup-chrome.outputs.chromedriver-path }}")"
+          pwd >> "$GITHUB_PATH"
       - run: pnpm install --frozen-lockfile --prefer-offline
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
       - run: pnpm ${{ matrix.browser == 'chrome' && 'e2e' || 'e2e:firefox' }}
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}

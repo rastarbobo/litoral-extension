@@ -1,0 +1,266 @@
+name: Release Extension
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # bump — derive the next version from Conventional-Commit messages since the
+  # last v* tag (or root commit when tagless), rewrite the 24 package.json
+  # files via update_version.sh, commit the bump back to main, and export the
+  # resolved version for the downstream build + release jobs.
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      bumped: ${{ steps.resolve.outputs.bumped }}
+      prev_version: ${{ steps.resolve.outputs.prev_version }}
+    steps:
+      # fetch-depth: 0 — bump_version.sh uses `git describe --tags` and
+      # `git log <range>`, both of which need full history + tags. Without
+      # this the script silently falls back to the root commit every run.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+      # Dry-run first so we can capture the proposed bump into step outputs
+      # without mutating files. `continue-on-error: true` because exit code 2
+      # (no-bumpable-commits) is a valid "nothing to do" path, not a failure;
+      # exit 1 is distinguished below by a hard-fail guard step.
+      - name: Dry-run bump_version.sh
+        id: dryrun
+        continue-on-error: true
+        run: |
+          set +e
+          out="$(bash bash-scripts/bump_version.sh --dry-run 2>&1)"
+          code=$?
+          echo "$out"
+          # Parse `Next version: X.Y.Z` via `grep + cut -d' ' -f3`. The line
+          # is exactly `Next version: 0.6.0`, so field 3 is the bare version.
+          next="$(printf '%s\n' "$out" | grep -E '^Next version:' | cut -d' ' -f3 || true)"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "next=$next"  >> "$GITHUB_OUTPUT"
+      # Hard-fail on exit code 1 (generic error). Exit 2 is handled downstream
+      # as "nothing to bump"; exit 0 proceeds to the actual bump. We can't read
+      # steps.dryrun.outputs.code until after the step, so this is a separate
+      # guard step. The earlier dryrun step already echoed its stdout to the
+      # job log, so the error log here just flags the failure.
+      - name: Fail on generic bump_version.sh error
+        if: steps.dryrun.outputs.code == '1'
+        run: |
+          echo "::error::bump_version.sh exited 1 (generic error). See the Dry-run step log above."
+          exit 1
+      - name: Resolve next version
+        id: resolve
+        run: |
+          # Read the currently-committed root package.json version.
+          committed="$(node -p "require('./package.json').version")"
+          code="${{ steps.dryrun.outputs.code }}"
+          next="${{ steps.dryrun.outputs.next }}"
+
+          if [[ "$code" == "0" && -n "$next" && "$next" != "$committed" ]]; then
+            # Dry-run found a bump and the next version differs from the
+            # committed one → apply the real bump, which rewrites every
+            # non-node_modules package.json via update_version.sh.
+            echo "Applying bump_version.sh for real (rewrites package.json files)..."
+            bash bash-scripts/bump_version.sh
+            bumped="true"
+            version="$next"
+          else
+            # Either no bumpable commits (code==2) or the proposed version is
+            # already what's committed → fall back to committed version and
+            # skip the commit/push.
+            if [[ "$code" == "2" ]]; then
+              echo "bump_version.sh reported no bumpable commits; using committed version."
+            elif [[ "$code" == "0" && "$next" == "$committed" ]]; then
+              echo "Proposed next version ($next) equals committed version; nothing to bump."
+            fi
+            bumped="false"
+            version="$committed"
+          fi
+
+          {
+            echo "version=v${version}"
+            echo "bumped=${bumped}"
+            echo "prev_version=${committed}"
+          } >> "$GITHUB_OUTPUT"
+      # Commit the bumped package.json files back to main. Guarded by
+      # bumped=true so a no-op run (no bumpable commits) doesn't fail.
+      # The [skip ci] footer prevents this workflow from re-triggering
+      # itself on the auto-commit (GitHub does NOT fire push events for
+      # GITHUB_TOKEN pushes to OTHER workflows, but this is belt-and-
+      # suspenders for our own).
+      - name: Commit bumped package.json files
+        id: commit
+        if: steps.resolve.outputs.bumped == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          # The bumped package.json now carries the new bare version; read it
+          # back so the commit message uses `0.6.0` (bare), not `v0.6.0`
+          # (tag form). The `v`-prefixed tag-style string lives only in
+          # steps.resolve.outputs.version for the release step below.
+          bare="$(node -p "require('./package.json').version")"
+          git commit -m "chore(release): bump version to ${bare} [skip ci]"
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+      # Push the bump commit back to main. continue-on-error: true is a
+      # deliberate fallback: if `main` has branch protection that rejects
+      # direct pushes, the push will fail but the workflow still proceeds
+      # using the locally-committed version for the tag/release. The
+      # package.json bump commit will land on the next manual or automated
+      # run that succeeds (or a human will cherry-pick it). The tag itself
+      # is created from a fresh checkout of `main` by the release job, so a
+      # failed push here does NOT corrupt the tag — at worst the tag points
+      # at the pre-bump SHA, which is the same version-string outcome when
+      # bumped=false.
+      - name: Push bump commit to main
+        id: push
+        if: steps.commit.outcome == 'success'
+        continue-on-error: true
+        run: |
+          git push
+      - name: Warn if bump push failed
+        if: steps.commit.outcome == 'success' && steps.push.outcome == 'failure'
+        run: |
+          echo "::warning::Failed to push bump commit to main (branch protection or race). The tag/release will proceed using the committed version. The package.json bump commit will need to be retried manually or on the next successful run."
+
+  # build — matrix chrome/firefox. Depends on `bump` (not read-version) and
+  # checks out main fresh. Because `bump` pushes BEFORE `build` starts, the
+  # default checkout of main already includes any bumped package.json. This
+  # ordering (bump push → build checkout) matters: if it were reversed the
+  # build would zip with the stale version baked into manifest.ts.
+  build:
+    needs: bump
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        browser: [chrome, firefox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --prefer-offline
+      # Chrome and Firefox builds run in separate jobs because base-build wipes dist/
+      # via pnpm clean:bundle; the Firefox .env mutation also must not leak into Chrome.
+      - run: pnpm ${{ matrix.browser == 'firefox' && 'zip:firefox' || 'zip' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.browser }}-build
+          path: dist-zip/*
+
+  release:
+    needs: [bump, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Skip if tag already exists
+        id: tag-check
+        run: |
+          if git ls-remote --tags origin "refs/tags/${{ needs.bump.outputs.version }}" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.tag-check.outputs.exists != 'true'
+        with:
+          path: dist-zip
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        if: steps.tag-check.outputs.exists != 'true'
+        with:
+          tag_name: ${{ needs.bump.outputs.version }}
+          name: ${{ needs.bump.outputs.version }}
+          files: |
+            dist-zip/*.zip
+            dist-zip/*.xpi
+          generate_release_notes: true
+
+  # changelog — regenerate CHANGELOG.md from Conventional-Commit history after
+  # the tag + GitHub Release have landed. Runs AFTER `release` (not just after
+  # `bump`) so the tag is guaranteed to exist in `origin` by the time we
+  # resolve `prev_tag` via `git describe`. The generator already exists at
+  # bash-scripts/generate_changelog.sh; this job just invokes it twice and
+  # commits the result. Closes the Phase 4.3 loop so the changelog is
+  # auto-regenerated by CI instead of only on manual runs.
+  changelog:
+    needs: [bump, release]
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — the generator calls `git describe --tags` and
+      # `git log <range>`, both of which require full history + tags. Without
+      # this, `git describe` on the just-cut tag's parent would fail to resolve
+      # `prev_tag` and we'd silently fall back to the root commit, pulling in
+      # the entire history on every release.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+      # Regenerate CHANGELOG.md in two passes, both inside one step so they
+      # share the working tree (the second pass amends the file the first
+      # pass wrote).
+      #
+      # Pass A — refresh the dated `## [<bare_version>] - YYYY-MM-DD` section
+      # for the just-cut release. We do NOT pass `--version` here: the
+      # generator reads `package.json#version` for the default, and the
+      # `bump` job already committed the bumped version. We DO pass
+      # `--from-ref <prev_tag>` because the bump commit itself is not a tag —
+      # the generator's "last v* tag" default would resolve to the PREVIOUS
+      # release's tag and double-count that release's commits into the new
+      # dated section. The range is exclusive on `--from-ref`, which is what
+      # we want: commits AFTER the previous tag THROUGH HEAD (inclusive of
+      # the bump commit).
+      #
+      # Pass B — reset the `## [Unreleased]` block to capture any post-bump
+      # commits that landed between the bump commit and HEAD. Range starts at
+      # the new tag (exclusive). Usually empty on a clean release run, but
+      # kept for safety against tag-vs-HEAD skew. `--version Unreleased`
+      # inserts/replaces the top-of-file Unreleased header idempotently.
+      - name: Regenerate CHANGELOG.md (dated section + Unreleased reset)
+        run: |
+          new_tag="${{ needs.bump.outputs.version }}"
+          prev_tag="$(git describe --tags --abbrev=0 "${new_tag}^" 2>/dev/null || true)"
+          echo "new_tag=${new_tag}"
+          echo "prev_tag=${prev_tag:-<root>}"
+          from_args=()
+          if [[ -n "$prev_tag" ]]; then from_args=(--from-ref "$prev_tag"); fi
+          bash bash-scripts/generate_changelog.sh "${from_args[@]}"
+          bash bash-scripts/generate_changelog.sh --version Unreleased --from-ref "$new_tag"
+      - name: Check for CHANGELOG.md changes
+        id: diff
+        run: |
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      # Commit + push the changelog refresh. `[skip ci]` matches the bump
+      # commit's convention and also prevents this workflow from re-triggering
+      # itself on the auto-commit (GitHub already doesn't fire push events for
+      # GITHUB_TOKEN pushes to the same workflow, but belt-and-suspenders).
+      - name: Commit + push CHANGELOG.md
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          bare="$(node -p "require('./package.json').version")"
+          git commit -m "docs(changelog): refresh CHANGELOG.md for v${bare} [skip ci]"
+          git push

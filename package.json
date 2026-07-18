@@ -94,5 +94,10 @@
   "packageManager": "pnpm@10.11.0",
   "engines": {
     "node": ">=22.15.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "@puppeteer/browsers": "2.13.2"
+    }
   }
 }

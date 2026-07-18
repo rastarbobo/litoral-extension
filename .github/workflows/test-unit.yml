@@ -1,9 +1,13 @@
-name: Lint Check
+name: Unit Tests
 
 on: [ pull_request ]
 
+permissions:
+  contents: read
+
 jobs:
-  eslint:
+  vitest:
+    name: vitest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -12,6 +16,5 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: pnpm
-
       - run: pnpm install --frozen-lockfile --prefer-offline
-      - run: pnpm lint
+      - run: pnpm test:unit

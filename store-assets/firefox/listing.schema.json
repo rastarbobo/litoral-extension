@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "./listing.schema.json",
+  "title": "Mozilla Add-ons (AMO) listing metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["slug", "name", "summary", "author"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "slug": { "type": "string", "pattern": "^[a-z0-9-]+$", "description": "AMO URL slug for the add-on." },
+    "name": { "type": "string", "maxLength": 50, "description": "Display name of the add-on." },
+    "summary": { "type": "string", "maxLength": 250, "description": "One-line summary shown in AMO search results." },
+    "description": {
+      "type": ["string", "null"],
+      "description": "Longer multi-paragraph description. AMO renders markdown."
+    },
+    "author": { "type": "string" },
+    "homepage": {
+      "type": ["object", "null"],
+      "properties": {
+        "url": { "type": ["string", "null"], "format": "uri" },
+        "outgoing": { "type": ["string", "null"] }
+      }
+    },
+    "categories": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+    "tags": { "type": "array", "maxItems": 5, "items": { "type": "string" } },
+    "has_privacy_policy": { "type": "boolean" },
+    "privacy_policy_url": { "type": ["string", "null"], "format": "uri" },
+    "is_featured": { "type": "boolean" },
+    "eula": { "type": ["string", "null"] },
+    "developer_agreement": { "type": "boolean" },
+    "version": {
+      "type": ["object", "null"],
+      "properties": { "license": { "type": "string" }, "id": { "type": "string" } }
+    }
+  }
+}

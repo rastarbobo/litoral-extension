@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/mozilla/addons-server/main/src/olympia/hero/serializers.py",
+  "slug": "litoral-agency-publisher",
+  "name": "Litoral Agency Publisher",
+  "summary": "Cross-browser publisher extension that polls your Litoral Agency backend for approved social posts and orchestrates per-platform scheduling in the operator's logged-in browser tabs. Chrome + Firefox supported.",
+  "description": "The Litoral Agency Publisher is a thin client extension that connects an operator's signed-in browser to the Litoral Agency scheduling backend. The service worker polls `https://litoral.agency/api/extension/*` for approved queued campaigns, claims a batch, opens publishing tabs on the target social platforms, drives per-platform content-script automation in the operator's already logged-in session, and reports success or failure telemetry back to the backend. It ships as a Chrome MV3 + Firefox WebExtension inside a pnpm + Turborepo monorepo.\n\n### Platforms supported\n\n- **Facebook** - Phase 1, live.\n- **Instagram** - Phase 1, live.\n- **Google Business Profile** - Phase 1, live.\n- **TikTok** - Phase 1.1, pending a test account. Not yet wired into the listing; the roadmap commits to adding it once the test account is provisioned.\n\nThe extension does not call platform APIs directly - it drives the operator's own logged-in browser tab via DOM automation, so publishing happens under the operator's existing platform session. The TikTok Publishing API proxy, where relevant, lives server-side at the Litoral Agency backend.\n\n### How it works\n\n1. The operator pastes a JWT bearer token into the popup `CONNECT` form. The token is stored in `chrome.storage.sync` (syncs across the operator's signed-in browsers) and attached as `Authorization: Bearer ${token}` to every backend `fetch`.\n2. The background service worker wakes on a `chrome.alarms` schedule (default 20-minute cadence, capped 1 then 2 then 5 then 5-min backoff on consecutive failures) and polls `/api/extension/queue`.\n3. On approved queued campaigns, the worker `POST`s to `/api/extension/queue/claim` to acquire a batch, then opens per-platform publishing tabs and injects content scripts to drive the scheduling flow.\n4. Per-platform telemetry (last success/failure, consecutive failures, breaker state) is persisted in `chrome.storage.local`. A per-platform circuit breaker (3 failures then OPEN for 15 min, auto-recovers) prevents hammering a flaky platform.\n5. On success, the worker calls `/api/extension/queue/scheduled` to mark the campaign scheduled on the backend and removes it from local pending state.\n\n### Privacy posture\n\n- The extension only makes `fetch` calls to `https://litoral.agency/api/extension/*` - no third-party analytics, no end-user data collection, no read/transmit of page content from the social platforms it automates.\n- Manifest permissions are limited to `alarms`, `storage`, `notifications`, `activeTab`, and `scripting`. `host_permissions` is intentionally empty - no domain allowlist is hardcoded.\n- `chrome.storage.sync` holds the operator JWT only. `chrome.storage.local` holds telemetry, claimed-campaign state, and circuit-breaker state. No data leaves the extension except API calls to the Litoral Agency backend.\n\n### Roadmap and license\n\nThis is the publisher side of the Litoral Agency system - it does not own campaign state, scheduling rules, or operator identity; those live in the backend. The extension is MIT-licensed; see the GitHub repository for full source. Roadmap status, open questions, and changelog live in `ROADMAP.md` in the source tree.",
+  "author": "Litoral Agency",
+  "homepage": {
+    "url": "__TODO__: production dashboard URL - ops to set once the public Litoral Agency dashboard URL is chosen",
+    "outgoing": null
+  },
+  "categories": { "firefox": ["social-communication"] },
+  "tags": ["facebook", "instagram", "google-business-profile", "publisher"],
+  "has_privacy_policy": false,
+  "privacy_policy_url": null,
+  "is_featured": false,
+  "eula": null,
+  "developer_agreement": true,
+  "version": { "license": "MIT", "id": "__TODO_VERSION_ID__" }
+}

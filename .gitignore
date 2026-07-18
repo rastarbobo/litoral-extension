@@ -27,3 +27,6 @@ tsconfig.tsbuildinfo
 # stray dev logs (server/output rotators from local tooling)
 /*.log
 .opencode/rotator.log
+
+# wdio persistent chrome profile (E2E --user-data-dir; keeps unpacked ext loaded)
+/.wdio-chrome-profile

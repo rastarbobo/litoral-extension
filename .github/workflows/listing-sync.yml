@@ -1,0 +1,181 @@
+name: Sync Store Listings
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'store-assets/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: listing-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Dark by default: the repo variable ENABLE_LISTING_SYNC must be set to
+    # the literal string "true" for this job to actually run. Until Phase
+    # 3.2/3.3 integration injects the store-API secrets, leave
+    # ENABLE_LISTING_SYNC unset so this workflow is a guaranteed no-op.
+    if: vars.ENABLE_LISTING_SYNC == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --prefer-offline
+
+      # ---- Chrome Web Store listing sync ----
+      # Gated on all four Chrome secrets being non-empty so the step is a
+      # no-op until Phase 3.2 integration lands the secrets.
+      - name: Sync Chrome listing
+        if: ${{ secrets.CHROME_CLIENT_ID != '' && secrets.CHROME_CLIENT_SECRET != '' && secrets.CHROME_REFRESH_TOKEN != '' && secrets.CHROME_EXTENSION_ID != '' }}
+        continue-on-error: true
+        env:
+          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+        # Chrome Web Store API flow:
+        #   1. Exchange the OAuth2 refresh token for an access token at
+        #      https://oauth2.googleapis.com/token (grant_type=refresh_token).
+        #   2. PATCH the listing fields from store-assets/chrome/listing.json
+        #      to the Items resource. The publish endpoint is documented as
+        #      https://www.googleapis.com/chromewebstore/v1.1.1/items/{itemId}/publish?publishTarget=trustedTesters|default
+        #      but the in-place listing-fields PATCH surface is not part of
+        #      the public Items.publish API and is NOT officially supported
+        #      for arbitrary listing-metadata edits via the REST API alone -
+        #      Phase 3.2 integration will likely need to combine the
+        #      Web Store API `items.update`/`items.list` surface with a
+        #      chrome-webstore-upload-style upload-or-publish call. This
+        #      script honestly reflects the token-exchange + a best-effort
+        #      PATCH to the publish endpoint with publishTarget=trustedTesters
+        #      (safety: full publish is Phase 3.2 territory, Q5 deploy-mode
+        #      decision still open).
+        run: |
+          set +e
+          node <<'NODE'
+          const fs = require('fs');
+          const listing = JSON.parse(fs.readFileSync('store-assets/chrome/listing.json', 'utf8'));
+          const clientId = process.env.CHROME_CLIENT_ID;
+          const clientSecret = process.env.CHROME_CLIENT_SECRET;
+          const refreshToken = process.env.CHROME_REFRESH_TOKEN;
+          const itemId = process.env.CHROME_EXTENSION_ID || listing.external_id;
+          // Step 1: refresh-token -> access token (OAuth2 token endpoint).
+          const tokenUrl = 'https://oauth2.googleapis.com/token';
+          // Step 2: PATCH the listing. The publish endpoint with
+          // publishTarget=trustedTesters is the documented surface:
+          //   https://www.googleapis.com/chromewebstore/v1.1.1/items/{itemId}/publish?publishTarget=trustedTesters
+          const publishUrl = `https://www.googleapis.com/chromewebstore/v1.1.1/items/${itemId}/publish?publishTarget=trustedTesters`;
+          (async () => {
+            try {
+              const tokenBody = new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                refresh_token: refreshToken,
+                grant_type: 'refresh_token',
+              });
+              const tokRes = await fetch(tokenUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: tokenBody.toString(),
+              });
+              if (!tokRes.ok) {
+                const txt = await tokRes.text();
+                console.warn(`::warning::Chrome OAuth2 token exchange failed: ${tokRes.status} ${txt}`);
+              } else {
+                const tokJson = await tokRes.json();
+                const accessToken = tokJson.access_token;
+                // Best-effort publish-to-trusted-testers call with the
+                // listing metadata in the body. NOTE: the real Web Store
+                // API expects a previously-uploaded package; in-place
+                // listing-field PATCH is not officially supported here.
+                const pubRes = await fetch(publishUrl, {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({ name: listing.name, description: listing.description }),
+                });
+                if (!pubRes.ok) {
+                  const txt = await pubRes.text();
+                  console.warn(`::warning::Chrome listing publish/PATCH returned ${pubRes.status}: ${txt}`);
+                } else {
+                  console.log(`Chrome listing sync response: ${await pubRes.text()}`);
+                }
+              }
+            } catch (err) {
+              console.warn(`::warning::Chrome listing sync script threw: ${err && err.message ? err.message : err}`);
+            } finally {
+              console.log('::notice::Chrome listing sync attempted');
+            }
+          })();
+          NODE
+
+      # ---- Firefox AMO listing sync ----
+      # Gated on both AMO secrets being non-empty so the step is a no-op
+      # until Phase 3.3 integration lands the secrets.
+      - name: Sync Firefox listing
+        if: ${{ secrets.AMO_API_KEY != '' && secrets.AMO_API_SECRET != '' }}
+        continue-on-error: true
+        env:
+          AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
+          AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
+        # AMO flow: web-ext sign only uploads the BINARY bundle; listing
+        # metadata (summary/description/tags/screenshots/etc.) is updated
+        # via the AMO REST API PATCH endpoint:
+        #   https://addons.mozilla.org/api/v5/addons/addon/{slug}/
+        # with HTTP Basic auth (api_key:api_secret). This step PATCHes
+        # store-assets/firefox/listing.json fields to that endpoint.
+        run: |
+          set +e
+          node <<'NODE'
+          const fs = require('fs');
+          const listing = JSON.parse(fs.readFileSync('store-assets/firefox/listing.json', 'utf8'));
+          const apiKey = process.env.AMO_API_KEY;
+          const apiSecret = process.env.AMO_API_SECRET;
+          const slug = listing.slug;
+          const amoUrl = `https://addons.mozilla.org/api/v5/addons/addon/${slug}/`;
+          (async () => {
+            try {
+              const auth = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
+              const patchBody = {
+                summary: listing.summary,
+                description: listing.description,
+                name: listing.name,
+                homepage: listing.homepage,
+                categories: listing.categories,
+                tags: listing.tags,
+              };
+              const res = await fetch(amoUrl, {
+                method: 'PATCH',
+                headers: {
+                  'Authorization': `Basic ${auth}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(patchBody),
+              });
+              if (!res.ok) {
+                const txt = await res.text();
+                console.warn(`::warning::AMO PATCH returned ${res.status}: ${txt}`);
+              } else {
+                console.log(`AMO listing sync response: ${await res.text()}`);
+              }
+            } catch (err) {
+              console.warn(`::warning::AMO listing sync script threw: ${err && err.message ? err.message : err}`);
+            } finally {
+              console.log('::notice::Firefox listing sync attempted');
+            }
+          })();
+          NODE
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "::notice::Listing sync workflow ran. See logs above for per-browser outcomes."

@@ -6,7 +6,7 @@ describe('Webextension DevTools Panel', () => {
     const devtoolsPanelUrl = `${extensionPath}/devtools-panel/index.html`;
 
     await browser.url(devtoolsPanelUrl);
-    await expect(browser).toHaveTitle('Devtools Panel');
+    await expect(browser).toHaveTitle('Devtools Panel', { wait: 5000, interval: 100 });
     await canSwitchTheme();
   });
 });

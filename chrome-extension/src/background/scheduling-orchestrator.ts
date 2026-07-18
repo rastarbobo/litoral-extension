@@ -118,10 +118,6 @@ const processPendingSchedules = async (): Promise<void> => {
       result = await scheduleOneCampaign(campaign);
 
       if (result.success && result.scheduledAt) {
-        // Mark scheduled on server BEFORE removing from local storage.
-        // If the server call fails, we keep the campaign in pendingSchedules
-        // so the stale lock scanner can auto-revert it on the next cycle.
-        await markScheduledOnServer(campaign.campaignId, result.scheduledAt);
         console.log(`[Litoral] Successfully scheduled campaign ${campaign.campaignId} on ${campaign.platform}`);
       } else {
         console.warn(
@@ -147,8 +143,14 @@ const processPendingSchedules = async (): Promise<void> => {
       );
     }
 
-    // Remove from pending AFTER server confirmation (success or not — we don't retry same campaign)
-    // On failure, the stale lock scanner will auto-revert the campaign to 'approved' for next cycle
+    // Remove from pending immediately after the result is determined — we never retry the
+    // same campaign in this cycle. On failure, the stale lock scanner will auto-revert the
+    // campaign to 'approved' for the next cycle.
+    // (Q9 fix candidate (a): moved BEFORE markScheduledOnServer so a hung marker fetch can
+    // no longer block local-state convergence. The 90s SCHEDULING_TIMEOUT_MS clears on
+    // SCHEDULE_COMPLETE; without this reordering, a never-resolving marker fetch would
+    // hold the await indefinitely — the 90s timer cannot rescue it because done() already
+    // cleared it. See ROADMAP.md → Open Questions & Decisions → Q9.)
     await extensionPollStorage.removeCampaign(campaign.campaignId);
 
     // Per-platform telemetry: write AFTER removeCampaign so a rejected set never
@@ -165,6 +167,42 @@ const processPendingSchedules = async (): Promise<void> => {
         const { code, message } = parseReason(result.reason);
         await extensionPollStorage.recordPlatformFailure(campaign.platform, code, message);
       }
+    }
+
+    // Mark scheduled on server AFTER local-state convergence (Q9 fix candidate (a)).
+    // If this call fails (non-OK status, network error, or hangs), the stale lock scanner
+    // auto-reverts the campaign to 'approved' on the next cycle. `markScheduledOnServer`
+    // does NOT swallow fetch rejections internally (post-Q9 fix (a)) — a thrown/rejected
+    // fetch propagates to the `.catch` handler below, which logs a single warning and
+    // continues the cycle. The non-OK status arm + the body.status-!=='success' arm still
+    // log + return early from inside `markScheduledOnServer` without throwing, so they do
+    // NOT reach this `.catch` — only true fetch rejections (TypeError, network outage,
+    // primitive) do.
+    //
+    // The marker call is DETACHED via `void` (Q9 fix (a) final shape) so a hung marker
+    // `fetch` cannot hold the cycle's promise resolution. Local-state convergence
+    // (`removeCampaign` + `recordPlatformSuccess` above) already ran synchronously before
+    // this fire-and-forget kick-off, so the Q9 fix (a) contract — "a hung marker fetch no
+    // longer blocks local-state convergence" — holds whether or not the marker ever
+    // settles. The DETACH is what makes the orchestrator's `processPendingSchedules`
+    // promise RESOLVE despite a still-pending marker (the E2 test's central assertion).
+    // Without it, `await markScheduledOnServer(...)` would block the for-loop body for the
+    // duration of the fetch hang even after the reorder — that's the trade-off the spec
+    // flagged between candidates (a) (pure reorder) and (b) (detach); the E2 contract
+    // requires both.
+    if (result?.success && result.scheduledAt) {
+      void markScheduledOnServer(campaign.campaignId, result.scheduledAt).catch(error => {
+        console.warn(
+          `[Litoral] markScheduledOnServer threw for campaign ${campaign.campaignId} — stale lock scanner will auto-revert; local state already converged.`,
+          // Q9 fix (a): `markScheduledOnServer` does NOT swallow fetch rejections
+          // internally; the rejection propagates here. The `error instanceof Error ?
+          // error.message : error` ternary mirrors the defensive pattern in the outer
+          // catch above. The truthy (Error) arm is covered by tests E3 + the new
+          // marker-throw test (TypeError / Error rejections); the falsy (primitive)
+          // arm is covered by the `'connection reset'` test (non-Error fetch reject).
+          error instanceof Error ? error.message : error,
+        );
+      });
     }
 
     // 90-second delay between platforms (prevents rate limiting)
@@ -334,6 +372,20 @@ const scheduleOneCampaign = async (campaign: CampaignPayload): Promise<ScheduleR
  * Notify the Litoral Platform API that a campaign has been scheduled.
  * Calls Story 6.2's POST /api/extension/queue/scheduled endpoint.
  * Atomically transitions pending_schedule → scheduled in D1.
+ *
+ * (Q9 fix candidate (a), 2026-07-18 — Phase 2.4 production-flight record):
+ * This function does NOT swallow fetch rejections internally anymore. The
+ * `try` block covers only the res.ok / res.json() read path; a network error
+ * or non-OK response propagates to the caller's try/catch (in
+ * `processPendingSchedules`'s loop body), which logs a single
+ * `console.warn('[Litoral] markScheduledOnServer threw for campaign ...')`
+ * and continues the cycle. The non-OK and status-!=='success' branches still
+ * log + return early without throwing (best-effort surface observability),
+ * so a 401/500/server-side rejection does NOT reach the outer wrapper — only
+ * a thrown/rejected fetch (TypeError, network outage, primitive rejection)
+ * does. This consolidates the marker's error-reporting surface at the new
+ * outer catch site, which is the only path that needs the warning prefix
+ * `markScheduledOnServer threw for campaign ...`.
  */
 const markScheduledOnServer = async (campaignId: string, scheduledAt: string): Promise<void> => {
   const token = await extensionAuthStorage.getToken();
@@ -342,35 +394,26 @@ const markScheduledOnServer = async (campaignId: string, scheduledAt: string): P
     return;
   }
 
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/extension/queue/scheduled`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ campaignId, scheduledAt }),
-    });
+  const res = await fetch(`${API_BASE_URL}/api/extension/queue/scheduled`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ campaignId, scheduledAt }),
+  });
 
-    if (!res.ok) {
-      console.error(`[Litoral] Failed to mark campaign ${campaignId} as scheduled on server: ${res.status}`);
-      return;
-    }
+  if (!res.ok) {
+    console.error(`[Litoral] Failed to mark campaign ${campaignId} as scheduled on server: ${res.status}`);
+    return;
+  }
 
-    const body = await res.json();
-    if (body.status !== 'success') {
-      console.warn(
-        `[Litoral] Server rejected schedule marker for campaign ${campaignId}:`,
-        body.message ?? 'unknown error',
-      );
-    }
-  } catch (error) {
-    console.error(
-      `[Litoral] Network error marking campaign ${campaignId} as scheduled:`,
-      error instanceof Error ? error.message : error,
+  const body = await res.json();
+  if (body.status !== 'success') {
+    console.warn(
+      `[Litoral] Server rejected schedule marker for campaign ${campaignId}:`,
+      body.message ?? 'unknown error',
     );
-    // Don't throw — the campaign was already removed from pendingSchedules.
-    // The stale lock scanner will auto-revert it to approved after 20 min.
   }
 };
 
