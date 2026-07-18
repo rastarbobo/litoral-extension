@@ -49,3 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(build)** skip non-entry items under content-script matches/
 - **(background)** preserve consecutiveFailures on stale breaker auto-close
 - **(background)** drop undefined __API_BASE_URL reference and remove typing-rejected alarms option
+
+## [0.6.3] - 2026-07-18
+
+### Fixed
+
+- **(scripts)** anchor update_version.sh's perl regex to the "version" field so dependency specifiers are not corrupted by partial-version matches
+- **(ci)** let release.yml's changelog job handle detached HEAD via `git checkout -B main` before pull/push
+
