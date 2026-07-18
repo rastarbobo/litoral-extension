@@ -259,7 +259,7 @@ export default function Popup() {
 
       {/* Footer */}
       <div className="border-t border-[#e5e5e7] px-4 py-2 text-center">
-        <p className="text-[11px] text-[#717786]">Polls every 20 min • v1.0.0</p>
+        <p className="text-[11px] text-[#717786]">Polls every 20 min • v{chrome.runtime.getManifest().version}</p>
       </div>
     </div>
   );
