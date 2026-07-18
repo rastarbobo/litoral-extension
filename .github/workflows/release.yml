@@ -310,23 +310,56 @@ jobs:
       # commit's convention and also prevents this workflow from re-triggering
       # itself on the auto-commit (GitHub already doesn't fire push events for
       # GITHUB_TOKEN pushes to the same workflow, but belt-and-suspenders).
+      #
+      # Why `git checkout -B main` + `git push origin main` instead of bare
+      # `git push`: this job's `actions/checkout@v4` step above uses
+      # `ref: needs.bump.outputs.commit_sha` to ensure we operate on the
+      # bumped SHA. Passing an explicit SHA to `ref:` causes actions/checkout
+      # to land in a DETACHED HEAD state, not on a local branch. A bare
+      # `git push` from a detached HEAD fails with
+      # `fatal: You are not currently on a branch` (this is exactly what
+      # happened on run 29644845628 after the first attempt to fix this):
+      # `git push` defaults to `push.default = upstream` which requires
+      # being on a branch with an upstream set. The fix is to either
+      # (a) `git push origin HEAD:main` (push detached HEAD to a named
+      # remote branch) or (b) create a local branch and switch to it
+      # before pushing. We choose (b) for symmetry with the `git pull
+      # --rebase` step which also requires a local branch to rebase onto.
+      #
       # The `git pull --rebase origin main` before the push is a defensive
-      # guard: if anything advanced `origin/main` between this job's checkout
-      # and the push (a Dependabot commit, a second concurrent release.yml
-      # run, a manual operator push), the changelog commit is replayed on
-      # top so the push is a clean fast-forward. Without this guard, the
-      # first v0.6.0 release's changelog job failed with
-      # `error: failed to push some refs to ...` (run 29644410074, exit 1).
-      # With the new explicit `ref: needs.bump.outputs.commit_sha` on the
-      # checkout above, this race is much less likely, but defensive rebase
-      # is cheap insurance against the corner cases.
+      # guard: if anything advanced `origin/main` between this job's
+      # checkout and the push (a Dependabot commit, a second concurrent
+      # release.yml run, a manual operator push), the changelog commit
+      # is replayed on top so the push is a clean fast-forward. With the
+      # explicit `ref: needs.bump.outputs.commit_sha` on the checkout
+      # above, the changelog commit's parent is the bump commit, so
+      # under the no-race case the pull --rebase is a no-op fast-forward
+      # and `git push origin main` cleanly advances origin/main by one.
+      #
+      # Historical note: the first v0.6.0 release's changelog job (run
+      # 29644410074) failed with `error: failed to push some refs to ...`
+      # because the bump job had advanced origin/main by one commit
+      # between the changelog job's checkout (pre-fix, no `ref:`) and
+      # its push. The fix split into two layers: (a) explicit
+      # `ref: needs.bump.outputs.commit_sha` on all three downstream
+      # jobs (build/release/changelog) so they always operate on the
+      # bumped SHA, and (b) `git pull --rebase origin main` here as
+      # defense against anything racing the changelog commit. Layer
+      # (a) alone turned out to be insufficient because it introduced
+      # a detached HEAD, which layer (b)'s `git pull/push` couldn't
+      # tolerate. The `git checkout -B main` line below is the third
+      # layer that makes (a)+(b) coexist.
       - name: Commit + push CHANGELOG.md
         if: steps.diff.outputs.changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # We are in a detached HEAD at needs.bump.outputs.commit_sha.
+          # Create a local main branch at this point so the upcoming
+          # `git pull --rebase` and `git push` have a branch to work on.
+          git checkout -B main
           git add CHANGELOG.md
           bare="$(node -p "require('./package.json').version")"
           git commit -m "docs(changelog): refresh CHANGELOG.md for v${bare} [skip ci]"
           git pull --rebase origin main
-          git push
+          git push origin main
