@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(background)** preserve consecutiveFailures on stale breaker auto-close
 - **(background)** drop undefined __API_BASE_URL reference and remove typing-rejected alarms option
 
+## [0.6.4] - 2026-07-18
+
+### Fixed
+
+- **(ci)** gate release.yml's changelog job on bumped=true to prevent destructive Pass B on no-bump runs + restore the ## [Unreleased] content Pass B destroyed on the v0.6.3 second run
+
 ## [0.6.3] - 2026-07-18
 
 ### Fixed
