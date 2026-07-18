@@ -1,0 +1,103 @@
+name: Publish to Firefox Add-ons (AMO)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'If true, sign only; do not flip the add-on to public'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-amo-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Dark by default: the repo variable ENABLE_STORE_PUBLISH must be set to
+    # the literal string "true" for this job to actually run. Phase 3.3
+    # territory — until the operator resolves Q5 (deploy-to-draft vs
+    # publish-to-public) and lands the two AMO_* secrets, leave
+    # ENABLE_STORE_PUBLISH unset so this workflow is a guaranteed no-op.
+    if: vars.ENABLE_STORE_PUBLISH == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --prefer-offline
+      # Rebuild the Firefox WebExtension xpi deterministically (the zipper
+      # is deterministic per packages/zipper/index.mts — same SHA inputs
+      # produce byte-identical archives). The release.yml `build` job
+      # already produced the same archive for the GitHub Release; we
+      # rebuild here because the `release.published` event does not
+      # have access to the prior workflow run's upload-artifact surface.
+      - run: pnpm zip:firefox
+      # Resolve the just-built xpi path + version — read from package.json
+      # to match the release pipeline's version (the version-bump commit
+      # already landed on main before the release event fired).
+      - name: Resolve artifact path
+        id: artifact
+        run: |
+          bare="$(node -p "require('./package.json').version")"
+          xpi_path="dist-zip/extension-v${bare}.xpi"
+          if [[ ! -f "$xpi_path" ]]; then
+            echo "::error::Expected Firefox xpi at $xpi_path not found after \`pnpm zip:firefox\`"
+            exit 1
+          fi
+          echo "xpi_path=$xpi_path" >> "$GITHUB_OUTPUT"
+          echo "version=$bare" >> "$GITHUB_OUTPUT"
+      # Gated on AMO_API_KEY + AMO_API_SECRET (Phase 3.3 integration).
+      # web-ext is the canonical AMO client; install per-step to avoid
+      # adding a dev-dep to the root package.json.
+      - name: Sign + publish to AMO via web-ext
+        if: ${{ secrets.AMO_API_KEY != '' && secrets.AMO_API_SECRET != '' }}
+        env:
+          AMO_API_KEY: ${{ secrets.AMO_API_KEY }}
+          AMO_API_SECRET: ${{ secrets.AMO_API_SECRET }}
+          XPI_PATH: ${{ steps.artifact.outputs.xpi_path }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        # web-ext sign signs the .xpi against the AMO API and uploads it.
+        # web-ext publish is not a separate command — once signed, the
+        # add-on is listed. To control visibility (draft vs public),
+        # web-ext has --channel listed|unlisted on `sign`:
+        #   - "unlisted" = signed but not visible in public search (Q5 default)
+        #   - "listed" = signed AND public (Q5 = publish-to-public)
+        # We default to "unlisted" via env AMO_CHANNEL below to fail safe.
+        #
+        # NOTE on DRY_RUN: web-ext has no native dry-run mode. The
+        # --channel=unlisted default IS the closest safe analog (the
+        # add-on is signed but not listed in public search). When
+        # DRY_RUN=true we emit a notice and still run sign with
+        # --channel=unlisted so the operator can validate the signing
+        # path end-to-end without flipping the add-on to public. The
+        # operator MUST manually unlist/remove in the AMO UI afterward
+        # if they don't want the signed add-on to remain.
+        run: |
+          channel="${AMO_CHANNEL:-unlisted}"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "::notice::DRY_RUN=true — web-ext has no native dry-run. Running sign --channel=unlisted (signed but NOT public). Validate the AMO response below; unlist/remove in the AMO UI if you don't want the signed add-on to remain."
+          fi
+          npx --yes web-ext@8.3.0 sign \
+            --source-dir dist/ \
+            --api-key "$AMO_API_KEY" \
+            --api-secret "$AMO_API_SECRET" \
+            --channel "$channel" \
+            --artifacts-dir dist-zip/ \
+            --verbose
+      - name: Skip-publish notice (missing secrets)
+        if: ${{ !(secrets.AMO_API_KEY != '' && secrets.AMO_API_SECRET != '') }}
+        run: |
+          echo "::notice::Skipped AMO publish — AMO_API_KEY or AMO_API_SECRET not set. Set ENABLE_STORE_PUBLISH=true + both AMO_* secrets to enable."
