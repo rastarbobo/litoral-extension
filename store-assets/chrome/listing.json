@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/GoogleChrome/webstore-api/main/lib/schema/ItemsResource.json",
+  "external_id": "__TODO_EXTENSION_ID__",
+  "name": "Litoral Agency Publisher",
+  "description": "__TODO__: 132-char max description for the store listing (Chrome hard limit).",
+  "category": "PRODUCTIVITY",
+  "icon_url": "store-assets/chrome/icon-128.png",
+  "small_tls_logo_url": null,
+  "homepage_url": "__TODO__: production dashboard URL",
+  "truckfest_url": null,
+  "privacy_practice_notes": "__TODO__: optional notes to reviewer",
+  "versions": [],
+  "items": [{ "id": "__TODO_EXTENSION_ID__", "upload_id": "__TODO__: auto-populated on upload" }]
+}

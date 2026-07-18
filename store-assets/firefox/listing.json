@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/mozilla/addons-server/main/src/olympia/hero/serializers.py",
+  "slug": "litoral-agency-publisher",
+  "name": "Litoral Agency Publisher",
+  "summary": "__TODO__: 250-char max one-liner for AMO listing.",
+  "description": "__TODO__: longer multi-paragraph description (markdown supported by AMO).",
+  "author": "Litoral Agency",
+  "homepage": { "url": "__TODO__: production dashboard URL", "outgoing": null },
+  "categories": { "firefox": ["other"] },
+  "tags": ["tiktok", "facebook", "instagram", "google-business-profile", "publisher"],
+  "has_privacy_policy": false,
+  "privacy_policy_url": null,
+  "is_featured": false,
+  "eula": null,
+  "developer_agreement": true,
+  "version": { "license": "MIT", "id": "__TODO_VERSION_ID__" }
+}
