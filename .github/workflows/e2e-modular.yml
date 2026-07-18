@@ -18,6 +18,22 @@ jobs:
     name: '${{ matrix.browser }} | Scenario: ${{ matrix.scenario }}'
     runs-on: ubuntu-latest
 
+    # Hard-disable: GitHub Actions treats `on: []` as a *soft* disable for
+    # legacy workflow files -- the workflow file still fires on every push
+    # to `main` (and possibly other events) even though no triggers are
+    # declared, and each of the 18 matrix slots runs `module-manager --de`
+    # which crashes immediately because Litoral's runtime-scripting
+    # architecture has none of the boilerplate feature keys it expects
+    # (chrome_url_overrides, content_scripts, etc.). The resulting 18
+    # red Xs on every main push are pure dashboard noise.
+    #
+    # `if: false` is the recommended GitHub Actions pattern to hard-disable
+    # a job that lives in a still-tracked workflow file. Keep this guard
+    # here (do NOT remove) until the Phase 2.4+ port of module-manager to
+    # Litoral's runtime model lands, at which point both this `if: false`
+    # AND the soft-disable `on: []` above should be removed together.
+    if: false
+
     strategy:
       fail-fast: false
       matrix:
