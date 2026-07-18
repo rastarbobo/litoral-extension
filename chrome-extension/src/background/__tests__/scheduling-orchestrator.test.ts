@@ -820,7 +820,14 @@ describe('scheduling-orchestrator', () => {
     vi.unstubAllGlobals();
   });
 
-  // ─── markScheduledOnServer: network error → catch-and-warn (line 353) ──
+  // ─── markScheduledOnServer: network error → outer catch-and-warn (Q9 fix (a)) ──
+  //
+  // Post-Q9 fix (a): `markScheduledOnServer` no longer swallows fetch rejections
+  // internally. A rejected `await fetch(...)` propagates to the new marker-only
+  // try/catch in `processPendingSchedules`'s loop body, which logs a single
+  // `console.warn('[Litoral] markScheduledOnServer threw for campaign ...')` and
+  // continues the cycle. The Error instance routes through the `error.message`
+  // arm (not the primitive else arm — that's covered by the test below).
   it('swallows a network error from markScheduledOnServer without failing the cycle', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-13T10:00:00.000Z'));
@@ -832,6 +839,7 @@ describe('scheduling-orchestrator', () => {
     const campaign = makeCampaign({ campaignId: 'c-net-err', platform: 'instagram' });
     await poll.storeClaimedCampaign(campaign);
 
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { processPendingSchedules, getSchedulingInProgress } = await reimportOrchestrator();
     const promise = processPendingSchedules();
 
@@ -845,6 +853,17 @@ describe('scheduling-orchestrator', () => {
     expect(getSchedulingInProgress()).toBe(false);
     expect((await poll.get()).pendingSchedules).toEqual([]);
 
+    // The new outer catch logged the marker throw with the Q9 fix (a) warn prefix
+    // and routed the Error through `error instanceof Error ? error.message : error`
+    // (truthy arm). The campaign was already removed from pendingSchedules before
+    // the marker awaited fetch — Q9 fix (a) explicit ordering contract.
+    const markerWarn = warnSpy.mock.calls.find(call =>
+      String(call[0] ?? '').includes('[Litoral] markScheduledOnServer threw for campaign c-net-err'),
+    );
+    expect(markerWarn, 'marker throw must reach the new outer catch arm').toBeDefined();
+    expect(markerWarn![1]).toBe('network down');
+
+    warnSpy.mockRestore();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -1191,8 +1210,19 @@ describe('scheduling-orchestrator', () => {
     vi.unstubAllGlobals();
   });
 
-  // ─── markScheduledOnServer: non-Error fetch rejection (L356 else arm) ──
-  it('logs a non-Error rejection reason from markScheduledOnServer without throwing', async () => {
+  // ─── markScheduledOnServer: non-Error fetch rejection (NEW marker-only catch else arm)
+  //
+  // Post-Q9 fix (a): with the internal swallow removed from `markScheduledOnServer`, a
+  // non-Error primitive rejection (e.g. a string) propagates to the new marker-only
+  // try/catch in the orchestrator loop body. The `error instanceof Error ? error.message
+  // : error` else arm of THAT new catch arm logs the primitive itself — this is the
+  // coverable branch the spec's `c8 ignore` fence around the else arm refers to (it gets
+  // covered by THIS test, hence the ignore is only around the unreachable defensive
+  // primitive-throw-fallback comment, not the whole else arm). Verifies the new wrapper's
+  // diagnostic line is the Q9 fix (a) marker prefix (not the legacy "Network error
+  // marking campaign..." message that lived inside `markScheduledOnServer`'s removed
+  // internal catch).
+  it('logs a non-Error rejection reason from markScheduledOnServer without throwing (Q9 fix (a) marker-only catch else arm)', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-13T10:00:00.000Z'));
     // Reject with a primitive string — production's catch arm uses
@@ -1205,7 +1235,7 @@ describe('scheduling-orchestrator', () => {
     const campaign = makeCampaign({ campaignId: 'c-string-rej', platform: 'instagram' });
     await poll.storeClaimedCampaign(campaign);
 
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { processPendingSchedules } = await reimportOrchestrator();
     const promise = processPendingSchedules();
 
@@ -1215,13 +1245,18 @@ describe('scheduling-orchestrator', () => {
     await vi.advanceTimersByTimeAsync(0);
     await promise;
 
-    const netErrCall = errSpy.mock.calls.find(call =>
-      String(call[0] ?? '').includes('Network error marking campaign c-string-rej as scheduled:'),
+    // The legacy `console.error('Network error marking campaign ...')` log lived
+    // inside `markScheduledOnServer`'s removed internal catch. Post-Q9 fix (a),
+    // the marker throw routes to the new outer wrapper which logs the Q9 prefix
+    // via `console.warn` instead. Search BOTH spies to be explicit about which
+    // surface the log landed on.
+    const markerWarn = warnSpy.mock.calls.find(call =>
+      String(call[0] ?? '').includes('[Litoral] markScheduledOnServer threw for campaign c-string-rej'),
     );
-    expect(netErrCall).toBeDefined();
+    expect(markerWarn, 'non-Error rejection must reach the new marker-only catch arm').toBeDefined();
     // The else arm produces the primitive itself, not error.message.
-    expect(netErrCall![1]).toBe('connection reset');
-    errSpy.mockRestore();
+    expect(markerWarn![1]).toBe('connection reset');
+    warnSpy.mockRestore();
 
     vi.useRealTimers();
     vi.unstubAllGlobals();
@@ -1330,27 +1365,32 @@ describe('scheduling-orchestrator', () => {
     vi.unstubAllGlobals();
   });
 
-  // ─── Phase 2.4 E2: hanging marker fetch blocks the cycle indefinitely ─────────────────
+  // ─── Phase 2.4 E2 (Q9 fix (a)): hanging marker fetch no longer blocks the cycle ─
   //
-  // PRODUCTION-BEHAVIOR FINDING (recorded for the 2.4 changelog):
-  // `scheduleOneCampaign` clears the 90-second `SCHEDULING_TIMEOUT_MS` timer
-  // the moment SCHEDULE_COMPLETE arrives (the `done()` callback runs
-  // `clearTimeout(timeout)` at line 225). After SCHEDULE_COMPLETE resolves the
-  // `inner` Promise, `processPendingSchedules` awaits `markScheduledOnServer`
-  // (line 124) BEFORE `removeCampaign` (line 152) and `recordPlatformSuccess`
-  // (line 160). A never-resolving marker fetch therefore hangs the entire
-  // scheduling cycle indefinitely — the 90s global timeout cannot rescue it
-  // (already cleared), `removeCampaign` never runs (campaign stays pending),
-  // and `recordPlatformSuccess` never runs (no success telemetry).
+  // BEFORE Q9 fix (a): `scheduleOneCampaign` clears the 90-second
+  // `SCHEDULING_TIMEOUT_MS` timer the moment SCHEDULE_COMPLETE arrives
+  // (the `done()` callback runs `clearTimeout(timeout)` at line 225), and
+  // `processPendingSchedules` awaited `markScheduledOnServer` BEFORE
+  // `removeCampaign` and `recordPlatformSuccess`. A never-resolving marker
+  // fetch therefore hung the entire scheduling cycle indefinitely — the 90s
+  // global timeout could not rescue it (already cleared), `removeCampaign`
+  // never ran (campaign stayed pending), and `recordPlatformSuccess` never
+  // ran (no success telemetry).
   //
-  // This PINS the production contract: the marker is NOT best-effort w.r.t.
-  // the scheduling-cycle Promise — its settle-time IS the cycle's settle-time.
-  // The spec's hope that the 90s timeout would fire after the hang cannot hold
-  // because SCHEDULE_COMPLETE already cleared that timer. A future fix could
-  // either (a) move the `await markScheduledOnServer` after reportPlatformSuccess
-  // + removeCampaign, or (b) detach it with a fire-and-forget `void` + a bounded
-  // timeout. This test exists so such a change is detected.
-  it('E2: a hanging marker fetch blocks the cycle — campaign stays pending, no success telemetry', async () => {
+  // AFTER Q9 fix (a) (2026-07-18, Phase 2.4): the `await markScheduledOnServer`
+  // call has been moved AFTER `removeCampaign` and the per-platform telemetry
+  // updates, and wrapped in its own try/catch so a future marker throw cannot
+  // cascade as an orchestrator-level error. A never-resolving marker fetch
+  // therefore no longer blocks local-state convergence: the campaign is
+  // removed from pendingSchedules, the success telemetry is recorded, and
+  // the cycle's promise resolves (it does NOT wait for the marker promise).
+  // The marker promise stays pending in the background; the stale lock
+  // scanner auto-reverts the server-side campaign lock if the marker POST
+  // truly never landed.
+  //
+  // This pins the NEW contract introduced by Q9 fix (a). The previous
+  // behavior (hang blocks the cycle) is intentionally no longer enforced.
+  it('E2 (Q9 fix (a)): a hanging marker fetch no longer blocks the cycle — local state converges (campaign removed, success telemetry recorded) while the marker call stays pending', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-13T10:00:00.000Z'));
     const fetchMock = mockFetchHang();
@@ -1365,14 +1405,15 @@ describe('scheduling-orchestrator', () => {
     const promise = processPendingSchedules();
 
     await flushUntilTabCreates(1);
-    // Drive SCHEDULE_COMPLETE — done() resolves inner, clears the 90s timer,
-    // then `await markScheduledOnServer(...)` enters its never-resolving fetch.
+    // Drive SCHEDULE_COMPLETE — done() resolves inner and clears the 90s timer.
+    // Under the Q9 fix (a), `removeCampaign` + `recordPlatformSuccess` now run
+    // BEFORE `await markScheduledOnServer(...)`, so the cycle's promise resolves
+    // even though the marker fetch is still pending.
     completeCampaignViaMessage(campaign.campaignId);
     await flushMicrotasks(40);
 
-    // The hang is still pending. Drive fake time far past the 90s scheduling
-    // window — the 90s timer was already cleared by `done()`, so no timeout
-    // fires. Nothing about the cycle advances.
+    // Flush past any microtask queue; the marker fetch hangs but the cycle
+    // no longer awaits it before local-state convergence.
     await vi.advanceTimersByTimeAsync(120_000);
     await flushMicrotasks(40);
 
@@ -1380,52 +1421,49 @@ describe('scheduling-orchestrator', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     assertFetchedUrl(fetchMock, '/queue/scheduled', 'POST');
 
-    // CONTRACT: the cycle is stuck. Campaign still pending, no success yet.
-    expect(getSchedulingInProgress()).toBe(true);
-    expect(__tabCreateCalls).toHaveLength(1);
-    const state = await poll.get();
-    expect(state.pendingSchedules).toHaveLength(1);
-    expect(state.pendingSchedules[0]!.campaignId).toBe(campaign.campaignId);
+    // KEY Q9 fix (a) assertions — local state converged despite the hang.
+    // The campaign is removed from pendingSchedules (not 1 — 0).
+    expect((await poll.get()).pendingSchedules).toEqual([]);
 
-    // No success telemetry recorded — `recordPlatformSuccess` is gated behind
-    // the awaiting `markScheduledOnServer` call. The platform telemetry object
-    // is pre-seeded with EMPTY_TELEMETRY defaults (lastSuccessAt:null,
-    // lastErrorCode:null, consecutiveFailures:0) at storage init, so the test
-    // asserts those exact defaults to prove no schedule success was recorded.
+    // Success telemetry was recorded (recordPlatformSuccess ran BEFORE the marker).
     const telemetry = await poll.getTelemetry();
-    expect(telemetry.instagram?.lastSuccessAt).toBeNull();
+    expect(telemetry.instagram?.lastSuccessAt).toBe(new Date('2026-07-13T10:00:00.000Z').getTime());
     expect(telemetry.instagram?.lastErrorCode).toBeNull();
-    expect(telemetry.instagram?.consecutiveFailures).toBe(0);
 
-    // The outer processPendingSchedules Promise is still pending: the hang
-    // owns the awaiting continuation. Do NOT await `promise` — it never
-    // resolves. Switch to real timers so the dangling microtask is GCed without
-    // vitest's fake-timer queue holding a reference.
+    // The cycle's promise RESOLVES despite the still-pending marker fetch.
+    // This is the central behavior change from Q9 fix (a). Drain the cycle
+    // and confirm `isSchedulingInProgress` dropped back to false.
+    await promise;
+    expect(getSchedulingInProgress()).toBe(false);
+
     vi.useRealTimers();
     vi.unstubAllGlobals();
-    // Detach: explicit void to signal the intentionally-unawaited promise.
-    void promise;
   });
 
-  // ─── Phase 2.4 E3: TypeError('Failed to fetch') reaches the Error arm of the catch ────
+  // ─── Phase 2.4 E3 (Q9 fix (a)): TypeError('Failed to fetch') reaches the Error arm ─
   //
-  // The existing rejection test (lines 822–849) covers `new Error('network down')`.
+  // The existing rejection test above covers `new Error('network down')`.
   // Chrome's ACTUAL offline sentinel is `TypeError('Failed to fetch')` — the
   // browser's fetch implementation throws this specific TypeError on a network
-  // outage (DOMException-safe, see fetch spec). Because TypeError extends Error
-  // it routes through `error instanceof Error ? error.message : error` (line 370)
-  // and NOT through the primitive-else arm at line 370. The marker log line
-  // therefore reports the message string `'Failed to fetch'`, not the TypeError
-  // object. This pins the offline-sentinel contract for the 2.4 changelog: a
-  // browser-side outage is observable end-to-end as a `console.error` containing
-  // the literal `'Failed to fetch'` rather than `'TypeError: Failed to fetch'`.
-  it('E3: a TypeError("Failed to fetch") rejection reaches the Error arm and logs error.message', async () => {
+  // outage (DOMException-safe, see fetch spec). Post-Q9 fix (a): the rejection
+  // propagates through `markScheduledOnServer` (whose internal swallow was removed)
+  // and is caught by the new marker-only try/catch in `processPendingSchedules`.
+  // Because TypeError extends Error, it routes through the new catch's
+  // `error instanceof Error ? error.message : error` (truthy arm — NOT the
+  // primitive else arm covered by the `'connection reset'` test above). The
+  // marker log line therefore reports the message string `'Failed to fetch'`,
+  // not the TypeError object. This pins the offline-sentinel contract for the
+  // 2.4 changelog (revised Q9 fix (a) variant): a browser-side outage is
+  // observable end-to-end as a `console.warn('[Litoral] markScheduledOnServer
+  // threw for campaign ...', 'Failed to fetch')` rather than the legacy
+  // `console.error('Network error marking campaign ...', 'Failed to fetch')`.
+  it('E3 (Q9 fix (a)): a TypeError("Failed to fetch") rejection reaches the new marker-only catch Error arm and logs error.message', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-13T10:00:00.000Z'));
     const fetchMock = mockFetchReject(new TypeError('Failed to fetch'));
     vi.stubGlobal('fetch', fetchMock);
 
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const { poll, auth } = await reimportStorage();
     await auth.setToken('test-token');
@@ -1445,20 +1483,21 @@ describe('scheduling-orchestrator', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     assertFetchedUrl(fetchMock, '/queue/scheduled', 'POST');
 
-    // The catch arm routed through `error instanceof Error ? error.message : error`.
-    // TypeError extends Error → true branch → logs `error.message` (the string)
+    // The new marker-only catch routed through `error instanceof Error ? error.message : error`.
+    // TypeError extends Error → truthy arm → logs `error.message` (the string)
     // rather than the TypeError object itself.
-    const netErrCall = errSpy.mock.calls.find(call =>
-      String(call[0] ?? '').includes('Network error marking campaign c-typeerr as scheduled:'),
+    const markerWarn = warnSpy.mock.calls.find(call =>
+      String(call[0] ?? '').includes('[Litoral] markScheduledOnServer threw for campaign c-typeerr'),
     );
-    expect(netErrCall, 'TypeError rejection must reach the catch arm').toBeDefined();
-    expect(netErrCall![1]).toBe('Failed to fetch');
+    expect(markerWarn, 'TypeError rejection must reach the new marker-only catch arm').toBeDefined();
+    expect(markerWarn![1]).toBe('Failed to fetch');
     // Negative assertion: must NOT be the primitive-else output (the TypeError
     // object) — that arm would log the object, not `'Failed to fetch'`.
-    expect(netErrCall![1]).not.toBeInstanceOf(TypeError);
+    expect(markerWarn![1]).not.toBeInstanceOf(TypeError);
 
     // Cycle degrades gracefully: success telemetry was recorded BEFORE the marker
-    // awaited the fetch, so the campaign is removed from pendingSchedules.
+    // awaited the fetch (Q9 fix (a) explicit ordering), so the campaign is removed
+    // from pendingSchedules.
     expect(getSchedulingInProgress()).toBe(false);
     expect((await poll.get()).pendingSchedules).toEqual([]);
     const telemetry = await poll.getTelemetry();
@@ -1469,7 +1508,108 @@ describe('scheduling-orchestrator', () => {
     // job on 401 paths, and the marker surface deliberately doesn't touch auth.
     expect(await auth.getToken()).toBe('test-token');
 
-    errSpy.mockRestore();
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // ─── Q9 fix (a): marker throw is caught by the marker-only try/catch ─
+  //
+  // Composite test pinning the NEW failure mode the Q9 fix (a) makes possible.
+  // Two campaigns in the queue: the first completes successfully but its
+  // marker-fetch throws (e.g. a TypeError from a malformed server response
+  // mid-flight — different from a plain fetch-rejection-only scenario).
+  // Post-Q9 fix (a), the new marker-only try/catch in `processPendingSchedules`'s
+  // loop body swallows the throw, logs a single
+  // `console.warn('[Litoral] markScheduledOnServer threw for campaign ...')`,
+  // and the cycle CONTINUES to the next campaign (the 90s inter-campaign delay
+  // fires and the SECOND campaign is scheduled cleanly). This pins:
+  //   (a) removeCampaign(c1) was called (campaign removed from local storage)
+  //   (b) recordPlatformSuccess(c1) was called (success telemetry converged
+  //       BEFORE the marker awaited fetch — Q9 fix (a) explicit ordering)
+  //   (c) console.warn called with the Q9 fix (a) marker prefix
+  //   (d) cycle continues to the next campaign (c2) — runs to completion
+  it('Q9 fix (a): a thrown marker fetch is caught by the marker-only try/catch — local state converged, warning logged, cycle continues to the next campaign', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-13T10:00:00.000Z'));
+    // First fetch (c1's marker) rejects with a TypeError — represents a network
+    // outage mid-flight. Second fetch (c2's marker) succeeds.
+    let fetchCall = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      fetchCall += 1;
+      if (fetchCall === 1) return Promise.reject(new TypeError('throw-marker-c1'));
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ status: 'success' }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { poll, auth } = await reimportStorage();
+    await auth.setToken('test-token');
+    const c1 = makeCampaign({ campaignId: 'c-throw-marker-1', platform: 'instagram' });
+    const c2 = makeCampaign({ campaignId: 'c-throw-marker-2', platform: 'facebook' });
+    await poll.storeClaimedCampaign(c1);
+    await poll.storeClaimedCampaign(c2);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { processPendingSchedules, getSchedulingInProgress } = await reimportOrchestrator();
+    const promise = processPendingSchedules();
+
+    // First campaign: complete the schedule; the marker then throws a TypeError
+    // which the new marker-only try/catch swallows.
+    await flushUntilTabCreates(1);
+    completeCampaignViaMessage(c1.campaignId);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Advance through the 90s inter-campaign delay → second campaign's tab opens.
+    await vi.advanceTimersByTimeAsync(90_000);
+    await flushUntilTabCreates(2);
+    completeCampaignViaMessage(c2.campaignId);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(0);
+    await promise;
+
+    // (a) Both campaigns removed from pendingSchedules (cycle progressed past c1
+    // despite the marker throw — Q9 fix (a) core behavior; previously the cycle
+    // would have hung and c2 would never have been touched).
+    expect((await poll.get()).pendingSchedules).toEqual([]);
+
+    // (b) Success telemetry was recorded for BOTH campaigns (the marker throw on
+    // c1 did not gate recordPlatformSuccess, since telemetry now runs BEFORE the
+    // marker await per Q9 fix (a)). The `lastSuccessAt` timestamps use
+    // `Date.now()` at the point of `recordPlatformSuccess`; c1's ran at the
+    // base setSystemTime (10:00:00) while c2's ran AFTER the 90s inter-campaign
+    // delay was advanced (10:01:30) — so the two timestamps differ by exactly
+    // 90_000ms.
+    const telemetry = await poll.getTelemetry();
+    expect(telemetry.instagram?.lastSuccessAt).toBe(new Date('2026-07-13T10:00:00.000Z').getTime());
+    expect(telemetry.instagram?.lastErrorCode).toBeNull();
+    expect(telemetry.facebook?.lastSuccessAt).toBe(new Date('2026-07-13T10:01:30.000Z').getTime());
+    expect(telemetry.facebook?.lastErrorCode).toBeNull();
+
+    // (c) The marker throw for c1 was logged via the new Q9 fix (a) marker-only
+    // catch's `console.warn` with the exact prefix specified by the fix.
+    const c1Warn = warnSpy.mock.calls.find(call =>
+      String(call[0] ?? '').includes('[Litoral] markScheduledOnServer threw for campaign c-throw-marker-1'),
+    );
+    expect(c1Warn, 'Q9 fix (a) marker-only catch must log the throw with its prefix').toBeDefined();
+    expect(c1Warn![1]).toBe('throw-marker-c1');
+    // No equivalent warning for c2 — its marker call succeeded, so the new catch
+    // arm never fired for the second campaign.
+    const c2Warn = warnSpy.mock.calls.find(call =>
+      String(call[0] ?? '').includes('[Litoral] markScheduledOnServer threw for campaign c-throw-marker-2'),
+    );
+    expect(c2Warn).toBeUndefined();
+
+    // (d) The cycle completed: `isSchedulingInProgress` is false, and both campaigns'
+    // tabs were created during the cycle (proving c2 ran after c1's marker threw).
+    expect(getSchedulingInProgress()).toBe(false);
+    expect(__tabCreateCalls).toHaveLength(2);
+
+    // Both fetch calls happened (one per marker), confirming c1's marker attempt
+    // was initiated and c2's marker attempt completed (res.ok path).
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    warnSpy.mockRestore();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
