@@ -1,3 +1,4 @@
+import { assertFetchedUrl, mockFetchHang, mockFetchReject, mockFetchStatus } from './fetch-harness';
 import {
   __resetChromeShim,
   __sendRuntimeMessage,
@@ -1258,6 +1259,217 @@ describe('scheduling-orchestrator', () => {
 
     expect(__tabCreateCalls).toHaveLength(1);
 
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // ─── Phase 2.4 E1: 401 from markScheduledOnServer is treated like a generic !ok failure ──
+  //
+  // The orchestrator's `markScheduledOnServer` (lines 338–375) does NOT branch
+  // on 401 specifically — the only fork is `!res.ok` (line 355) followed by
+  // `body.status === 'error'` (line 361). A 401 hits the `!res.ok` arm
+  // identically to a 500: log `console.error`, return. The schedule is still
+  // counted as success *locally* — success telemetry is recorded and the
+  // campaign is removed from pendingSchedules (lines 152/160 run after
+  // markScheduledOnServer resolves via its early `return`). The 401 detection
+  // + token-clear path lives in `index.ts`'s fetchQueue/claimCampaign handlers,
+  // NOT here. This test LOCKS IN that contract for the marker surface so a
+  // future refactor that adds 401 handling to the orchestrator will surface as
+  // a failing test (a deliberate 2.4 changelog entry).
+  it('E1: treats a 401 from markScheduledOnServer like a non-OK failure — logs, returns, still records success', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-13T10:00:00.000Z'));
+    // mockFetchStatus(401, ...) derives ok=false from the 2xx range, so production
+    // takes the `!res.ok` arm at line 355 BEFORE awaiting res.json(). The JSend
+    // body is unreachable on this path yet provided here for completeness.
+    const fetchMock = vi.fn().mockResolvedValue(mockFetchStatus(401, { status: 'error', message: 'Unauthorized' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { poll, auth } = await reimportStorage();
+    await auth.setToken('test-token');
+    const campaign = makeCampaign({ campaignId: 'c-401-marker', platform: 'instagram' });
+    await poll.storeClaimedCampaign(campaign);
+
+    const { processPendingSchedules, getSchedulingInProgress } = await reimportOrchestrator();
+    const promise = processPendingSchedules();
+
+    await flushUntilTabCreates(1);
+    completeCampaignViaMessage(campaign.campaignId);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(0);
+    await promise;
+
+    // The marker POST hit the server exactly once at /queue/scheduled with POST.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    assertFetchedUrl(fetchMock, '/queue/scheduled', 'POST');
+
+    // Contract: 401 hits the `!res.ok` arm — console.error logs the status code.
+    const markerErr = errSpy.mock.calls.find(call =>
+      String(call[0] ?? '').includes('Failed to mark campaign c-401-marker as scheduled on server: 401'),
+    );
+    expect(markerErr, '401 should reach the !res.ok arm and log the status code').toBeDefined();
+
+    // Local success was still recorded (the schedule itself succeeded; the
+    // marker is best-effort w.r.t. local telemetry).
+    expect(getSchedulingInProgress()).toBe(false);
+    expect(__tabCreateCalls).toHaveLength(1);
+    expect((await poll.get()).pendingSchedules).toEqual([]);
+
+    const telemetry = await poll.getTelemetry();
+    expect(telemetry.instagram?.lastSuccessAt).toBe(new Date('2026-07-13T10:00:00.000Z').getTime());
+    expect(telemetry.instagram?.lastErrorCode).toBeNull();
+
+    // The orchestrator does NOT touch the auth token on 401 — that's index.ts's
+    // responsibility on the fetchQueue/claimCampaign paths, not the marker's.
+    expect(await auth.getToken()).toBe('test-token');
+
+    errSpy.mockRestore();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // ─── Phase 2.4 E2: hanging marker fetch blocks the cycle indefinitely ─────────────────
+  //
+  // PRODUCTION-BEHAVIOR FINDING (recorded for the 2.4 changelog):
+  // `scheduleOneCampaign` clears the 90-second `SCHEDULING_TIMEOUT_MS` timer
+  // the moment SCHEDULE_COMPLETE arrives (the `done()` callback runs
+  // `clearTimeout(timeout)` at line 225). After SCHEDULE_COMPLETE resolves the
+  // `inner` Promise, `processPendingSchedules` awaits `markScheduledOnServer`
+  // (line 124) BEFORE `removeCampaign` (line 152) and `recordPlatformSuccess`
+  // (line 160). A never-resolving marker fetch therefore hangs the entire
+  // scheduling cycle indefinitely — the 90s global timeout cannot rescue it
+  // (already cleared), `removeCampaign` never runs (campaign stays pending),
+  // and `recordPlatformSuccess` never runs (no success telemetry).
+  //
+  // This PINS the production contract: the marker is NOT best-effort w.r.t.
+  // the scheduling-cycle Promise — its settle-time IS the cycle's settle-time.
+  // The spec's hope that the 90s timeout would fire after the hang cannot hold
+  // because SCHEDULE_COMPLETE already cleared that timer. A future fix could
+  // either (a) move the `await markScheduledOnServer` after reportPlatformSuccess
+  // + removeCampaign, or (b) detach it with a fire-and-forget `void` + a bounded
+  // timeout. This test exists so such a change is detected.
+  it('E2: a hanging marker fetch blocks the cycle — campaign stays pending, no success telemetry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-13T10:00:00.000Z'));
+    const fetchMock = mockFetchHang();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { poll, auth } = await reimportStorage();
+    await auth.setToken('test-token');
+    const campaign = makeCampaign({ campaignId: 'c-hang-marker', platform: 'instagram' });
+    await poll.storeClaimedCampaign(campaign);
+
+    const { processPendingSchedules, getSchedulingInProgress } = await reimportOrchestrator();
+    const promise = processPendingSchedules();
+
+    await flushUntilTabCreates(1);
+    // Drive SCHEDULE_COMPLETE — done() resolves inner, clears the 90s timer,
+    // then `await markScheduledOnServer(...)` enters its never-resolving fetch.
+    completeCampaignViaMessage(campaign.campaignId);
+    await flushMicrotasks(40);
+
+    // The hang is still pending. Drive fake time far past the 90s scheduling
+    // window — the 90s timer was already cleared by `done()`, so no timeout
+    // fires. Nothing about the cycle advances.
+    await vi.advanceTimersByTimeAsync(120_000);
+    await flushMicrotasks(40);
+
+    // The marker fetch was initiated exactly once and is still hanging.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    assertFetchedUrl(fetchMock, '/queue/scheduled', 'POST');
+
+    // CONTRACT: the cycle is stuck. Campaign still pending, no success yet.
+    expect(getSchedulingInProgress()).toBe(true);
+    expect(__tabCreateCalls).toHaveLength(1);
+    const state = await poll.get();
+    expect(state.pendingSchedules).toHaveLength(1);
+    expect(state.pendingSchedules[0]!.campaignId).toBe(campaign.campaignId);
+
+    // No success telemetry recorded — `recordPlatformSuccess` is gated behind
+    // the awaiting `markScheduledOnServer` call. The platform telemetry object
+    // is pre-seeded with EMPTY_TELEMETRY defaults (lastSuccessAt:null,
+    // lastErrorCode:null, consecutiveFailures:0) at storage init, so the test
+    // asserts those exact defaults to prove no schedule success was recorded.
+    const telemetry = await poll.getTelemetry();
+    expect(telemetry.instagram?.lastSuccessAt).toBeNull();
+    expect(telemetry.instagram?.lastErrorCode).toBeNull();
+    expect(telemetry.instagram?.consecutiveFailures).toBe(0);
+
+    // The outer processPendingSchedules Promise is still pending: the hang
+    // owns the awaiting continuation. Do NOT await `promise` — it never
+    // resolves. Switch to real timers so the dangling microtask is GCed without
+    // vitest's fake-timer queue holding a reference.
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    // Detach: explicit void to signal the intentionally-unawaited promise.
+    void promise;
+  });
+
+  // ─── Phase 2.4 E3: TypeError('Failed to fetch') reaches the Error arm of the catch ────
+  //
+  // The existing rejection test (lines 822–849) covers `new Error('network down')`.
+  // Chrome's ACTUAL offline sentinel is `TypeError('Failed to fetch')` — the
+  // browser's fetch implementation throws this specific TypeError on a network
+  // outage (DOMException-safe, see fetch spec). Because TypeError extends Error
+  // it routes through `error instanceof Error ? error.message : error` (line 370)
+  // and NOT through the primitive-else arm at line 370. The marker log line
+  // therefore reports the message string `'Failed to fetch'`, not the TypeError
+  // object. This pins the offline-sentinel contract for the 2.4 changelog: a
+  // browser-side outage is observable end-to-end as a `console.error` containing
+  // the literal `'Failed to fetch'` rather than `'TypeError: Failed to fetch'`.
+  it('E3: a TypeError("Failed to fetch") rejection reaches the Error arm and logs error.message', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-13T10:00:00.000Z'));
+    const fetchMock = mockFetchReject(new TypeError('Failed to fetch'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { poll, auth } = await reimportStorage();
+    await auth.setToken('test-token');
+    const campaign = makeCampaign({ campaignId: 'c-typeerr', platform: 'instagram' });
+    await poll.storeClaimedCampaign(campaign);
+
+    const { processPendingSchedules, getSchedulingInProgress } = await reimportOrchestrator();
+    const promise = processPendingSchedules();
+
+    await flushUntilTabCreates(1);
+    completeCampaignViaMessage(campaign.campaignId);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(0);
+    await promise;
+
+    // The fetch was called once and rejected with TypeError.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    assertFetchedUrl(fetchMock, '/queue/scheduled', 'POST');
+
+    // The catch arm routed through `error instanceof Error ? error.message : error`.
+    // TypeError extends Error → true branch → logs `error.message` (the string)
+    // rather than the TypeError object itself.
+    const netErrCall = errSpy.mock.calls.find(call =>
+      String(call[0] ?? '').includes('Network error marking campaign c-typeerr as scheduled:'),
+    );
+    expect(netErrCall, 'TypeError rejection must reach the catch arm').toBeDefined();
+    expect(netErrCall![1]).toBe('Failed to fetch');
+    // Negative assertion: must NOT be the primitive-else output (the TypeError
+    // object) — that arm would log the object, not `'Failed to fetch'`.
+    expect(netErrCall![1]).not.toBeInstanceOf(TypeError);
+
+    // Cycle degrades gracefully: success telemetry was recorded BEFORE the marker
+    // awaited the fetch, so the campaign is removed from pendingSchedules.
+    expect(getSchedulingInProgress()).toBe(false);
+    expect((await poll.get()).pendingSchedules).toEqual([]);
+    const telemetry = await poll.getTelemetry();
+    expect(telemetry.instagram?.lastSuccessAt).toBe(new Date('2026-07-13T10:00:00.000Z').getTime());
+    expect(telemetry.instagram?.lastErrorCode).toBeNull();
+
+    // The orchestrator does not clear the token on a TypeError — that's index.ts's
+    // job on 401 paths, and the marker surface deliberately doesn't touch auth.
+    expect(await auth.getToken()).toBe('test-token');
+
+    errSpy.mockRestore();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
